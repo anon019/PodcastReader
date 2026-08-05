@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["priority", "oneSentence", "participants", "topics", "keyInsights", "extensions", "evidenceLimits", "nextQuestions", "guestSources"],
+  "properties": {
+    "priority": {"type": "string", "enum": ["must_read", "worth_reading", "skim", "archive"]},
+    "oneSentence": {"type": "string"},
+    "participants": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "role", "background", "relevance", "verification", "sourceUrls"],
+        "properties": {
+          "name": {"type": "string"},
+          "role": {"type": "string", "enum": ["host", "cohost", "guest", "other"]},
+          "background": {"type": "string"},
+          "relevance": {"type": "string"},
+          "verification": {"type": "string", "enum": ["verified", "partial", "unknown"]},
+          "sourceUrls": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "topics": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "summary", "keyPoints", "timestamps"],
+        "properties": {
+          "title": {"type": "string"},
+          "summary": {"type": "string"},
+          "keyPoints": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "timestamps": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "keyInsights": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "explanation", "timestamp", "speaker", "confidence"],
+        "properties": {
+          "title": {"type": "string"},
+          "explanation": {"type": "string"},
+          "timestamp": {"type": "string"},
+          "speaker": {"type": "string"},
+          "confidence": {"type": "string", "enum": ["high", "medium", "low"]}
+        }
+      }
+    },
+    "extensions": {"type": "array", "items": {"type": "string"}},
+    "evidenceLimits": {"type": "array", "items": {"type": "string"}},
+    "nextQuestions": {"type": "array", "items": {"type": "string"}},
+    "guestSources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "url", "relevance"],
+        "properties": {
+          "title": {"type": "string"},
+          "url": {"type": "string"},
+          "relevance": {"type": "string"}
+        }
+      }
+    }
+  }
+}

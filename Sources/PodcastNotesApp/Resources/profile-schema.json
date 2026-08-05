@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["category", "minDuration", "profileVersion", "profilePrompt"],
+  "properties": {
+    "category": {"type": "string"},
+    "minDuration": {"type": "integer", "minimum": 0, "maximum": 7200},
+    "profileVersion": {"type": "string"},
+    "profilePrompt": {"type": "string", "minLength": 200, "maxLength": 3000}
+  }
+}
