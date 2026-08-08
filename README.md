@@ -14,8 +14,8 @@ The toolbar provides optional one-shot manual update and add-link actions. Suppo
 ## Runtime contract
 
 - YouTube RSS and channel pages discover episodes.
-- `/opt/homebrew/bin/summarize --youtube web --extract` reads YouTube caption tracks.
-- Audio is never downloaded and no ASR backend is called. Missing or incomplete captions become `no_transcript` with a visible reason.
+- `/opt/homebrew/bin/summarize` 0.21.8 or later reads YouTube caption tracks; its Homebrew `yt-dlp` dependency provides the transcript-only fallback.
+- Audio is never downloaded and no ASR backend is called. Caption extraction first uses YouTube's low-cost web transcript, then falls back to `yt-dlp` for YouTube's own subtitle track; missing or incomplete captions become `no_transcript` with a visible reason.
 - `/opt/homebrew/bin/codex exec -m gpt-5.6-luna` performs source-specific extraction and bilingual translation. Content calls use Luna's default reasoning configuration; the Codex automation itself uses `max` reasoning effort.
 - Original Transcript, Chinese translation, participant research, topic map, core insights, evidence limits, and source links are saved in local SQLite.
 - The reading order is one-sentence takeaway, one-paragraph core summary, participants, topic map, core insights, evidence, and bilingual Transcript. Original publication and local organization timestamps are shown to the second in the Mac's current time zone.
@@ -45,7 +45,7 @@ scripts/install_personal_app.sh
 scripts/verify.sh
 ```
 
-This runs the Swift build with warnings treated as errors, Python syntax checks, twelve isolated pipeline tests, shell syntax validation, source-catalog validation, plist validation, and installed-app signature verification when present.
+This runs the Swift build with warnings treated as errors, Python syntax checks, thirteen isolated pipeline tests, shell syntax validation, source-catalog validation, plist validation, and installed-app signature verification when present.
 
 ## Main source files
 

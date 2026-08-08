@@ -543,29 +543,55 @@ def transcript_language(text: str) -> str:
     return "zh" if cjk / visible >= 0.12 else "en"
 
 
+def clean_transcript_output(text: str) -> str:
+    """Remove extractor receipts that are not spoken transcript content."""
+    return "\n".join(
+        line for line in text.splitlines()
+        if line.strip().lower() != "transcript:"
+        and not line.strip().lower().startswith("youtube views:")
+    ).strip()
+
+
 def fetch_transcript(episode: sqlite3.Row) -> tuple[str, list[tuple[str, float | None, str]]]:
     summarize = Path("/opt/homebrew/bin/summarize")
     if not summarize.exists():
         raise RuntimeError("未找到 /opt/homebrew/bin/summarize")
-    command = [str(summarize), episode["url"], "--youtube", "web", "--video-mode", "transcript",
-               "--extract", "--timestamps", "--plain", "--no-color", "--metrics", "off", "--timeout", "90s"]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
-    transcript = result.stdout.strip()
     duration = episode["duration_seconds"] or 0
     # The YouTube web fallback sometimes returns the video description and a
     # chapter outline as if it were a transcript. For long-form content, require
     # enough text density to represent actual speech rather than metadata.
     minimum_chars = max(240, int(duration * 0.8))
-    looks_like_description = duration >= 900 and len(transcript) < minimum_chars
-    if result.returncode != 0 or len(transcript) < 240 or looks_like_description:
-        receipt = (result.stderr or result.stdout or "YouTube 未返回可用字幕轨").strip()
+    receipts: list[str] = []
+
+    # Stay transcript-only: first use the cheapest direct web path, then ask
+    # yt-dlp for YouTube's own subtitle track. Neither mode downloads audio or
+    # invokes ASR. The second path covers YouTube caption API changes that can
+    # leave the web extractor returning only the description.
+    for mode in ("web", "yt-dlp"):
+        command = [str(summarize), episode["url"], "--youtube", mode, "--video-mode", "transcript",
+                   "--extract", "--timestamps", "--plain", "--no-color", "--metrics", "off", "--timeout", "90s"]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            receipts.append(f"{mode} 字幕获取超时")
+            continue
+        transcript = clean_transcript_output(result.stdout)
+        looks_like_description = duration >= 900 and len(transcript) < minimum_chars
+        if result.returncode == 0 and len(transcript) >= 240 and not looks_like_description:
+            segments = parse_transcript(transcript)
+            if not segments:
+                segments = [("", None, transcript)]
+            return transcript, segments
         if looks_like_description:
-            receipt = f"YouTube 只返回了 {len(transcript)} 字的简介/章节，低于 {duration} 秒节目所需的完整字幕门槛"
-        raise RuntimeError(receipt[-2000:])
-    segments = parse_transcript(transcript)
-    if not segments:
-        segments = [("", None, transcript)]
-    return transcript, segments
+            receipts.append(f"{mode} 只返回 {len(transcript)} 字的简介/章节")
+        else:
+            detail = (result.stderr or result.stdout or "未返回可用字幕轨").strip()
+            receipts.append(f"{mode}: {detail[-800:]}")
+
+    detail = "；".join(receipts)
+    raise RuntimeError(
+        f"YouTube 未返回完整字幕（节目 {duration} 秒，完整字幕门槛 {minimum_chars} 字）：{detail}"[-4000:]
+    )
 
 
 def analysis_prompt(episode: sqlite3.Row, source: sqlite3.Row, transcript: str) -> str:

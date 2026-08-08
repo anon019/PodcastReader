@@ -1,6 +1,6 @@
 # Podcast Reader 产品与运行契约
 
-版本：0.6（个人本地版）
+版本：0.6.1（个人本地版）
 
 ## 1. 产品定义
 
@@ -34,7 +34,7 @@ Podcast Reader 是一个本地 macOS 内容阅读器，职责只有三件事：
 
 ## 4. Transcript 契约
 
-- 仅获取 YouTube 已提供的 Transcript，不下载音频，不做本地 ASR。
+- 仅获取 YouTube 已提供的 Transcript，不下载音频，不做本地 ASR；优先读取 Web 字幕，Web 只返回简介或章节时再由 `yt-dlp` 读取同一条 YouTube 字幕轨。
 - 保存完整原文、语言、时间戳、段落顺序和中文翻译。
 - 对长节目执行字幕密度检查，拒绝把视频描述或章节摘要当成完整 Transcript。
 - 翻译逐段执行并可续跑，只补齐缺失段落，不改写原文。

@@ -63,6 +63,30 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("coreSummary", prompt)
         self.assertIn("一个自然段", prompt)
 
+    def test_transcript_fetch_falls_back_to_ytdlp_without_asr(self):
+        description = "00:00 Chapter\n" + "short " * 20
+        transcript = "\n".join(
+            f"[{index // 60}:{index % 60:02d}] spoken transcript sentence {index}"
+            for index in range(900)
+        )
+        results = [
+            pipeline.subprocess.CompletedProcess([], 0, description, ""),
+            pipeline.subprocess.CompletedProcess([], 0, "YouTube views: 10\n\nTranscript:\n" + transcript, ""),
+        ]
+        with mock.patch.object(pipeline.subprocess, "run", side_effect=results) as run:
+            text, segments = pipeline.fetch_transcript({
+                "url": "https://www.youtube.com/watch?v=Fallback01",
+                "duration_seconds": 900,
+            })
+        modes = [call.args[0][call.args[0].index("--youtube") + 1] for call in run.call_args_list]
+        self.assertEqual(modes, ["web", "yt-dlp"])
+        self.assertNotIn("YouTube views", text)
+        self.assertTrue(segments)
+        self.assertTrue(all(
+            "--video-mode" in call.args[0] and "transcript" in call.args[0]
+            for call in run.call_args_list
+        ))
+
     def test_discovery_is_incremental_and_idempotent(self):
         self.enable_only()
         item = {
