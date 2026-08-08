@@ -46,6 +46,10 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $model.isShowingAddSheet) { AddLinkSheet() }
+        .onAppear { applyAppearance(appearanceMode) }
+        .onChange(of: appearanceMode) { _, newValue in
+            applyAppearance(newValue)
+        }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(10))
@@ -54,6 +58,7 @@ struct ContentView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            applyAppearance(appearanceMode)
             model.refreshLibrary()
         }
         .alert("Podcast Reader", isPresented: Binding(
@@ -64,6 +69,11 @@ struct ContentView: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
+    }
+
+    private func applyAppearance(_ rawValue: String) {
+        let mode = AppearanceMode(rawValue: rawValue) ?? .system
+        NSApplication.shared.appearance = mode.appKitAppearance
     }
 }
 
@@ -76,64 +86,46 @@ struct LibrarySidebar: View {
     ]
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 2) {
-                SidebarHeading("内容阅读")
-                sidebarButton(.today, count: model.todayCount)
-                sidebarButton(.unread, count: model.unreadCount)
+        VStack(spacing: 0) {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    SidebarHeading("阅读")
+                    sidebarButton(.today, count: model.todayCount)
+                    sidebarButton(.unread, count: model.unreadCount)
 
-                SidebarHeading("研究书架")
-                ForEach(categories, id: \.self) { category in
-                    let matching = model.sources.filter { $0.category == category }
+                    SidebarHeading("Podcast 书架")
+                    ForEach(categories, id: \.self) { category in
+                        let matching = model.sources.filter { $0.category == category }
+                        Button {
+                            model.selectedSourceID = nil
+                            model.selectedCategory = category
+                            model.selectedSection = .today
+                            model.selectedEpisodeID = model.filteredEpisodes.first?.id
+                            model.loadSelectedDetail()
+                        } label: {
+                            HStack(spacing: 9) {
+                                Circle().fill(categoryColor(category)).frame(width: 7, height: 7)
+                                Text(category)
+                                Spacer()
+                                Text("\(matching.count)").foregroundStyle(.tertiary)
+                            }
+                        }
+                        .buttonStyle(SidebarRowStyle(selected: model.selectedCategory == category))
+                    }
                     Button {
                         model.selectedSourceID = nil
-                        model.selectedCategory = category
-                        model.selectedSection = .today
-                        model.selectedEpisodeID = model.filteredEpisodes.first?.id
-                        model.loadSelectedDetail()
+                        model.selectedCategory = nil
+                        model.selectedSection = .sources
                     } label: {
-                        HStack(spacing: 9) {
-                            Circle().fill(categoryColor(category)).frame(width: 7, height: 7)
-                            Text(category)
-                            Spacer()
-                            Text("\(matching.count)").foregroundStyle(.tertiary)
-                        }
+                        Label("管理 \(model.sources.count) 个来源", systemImage: "slider.horizontal.3")
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .buttonStyle(SidebarRowStyle(selected: model.selectedCategory == category))
+                    .buttonStyle(SidebarRowStyle(selected: model.selectedSection == .sources))
                 }
-                Button {
-                    model.selectedSourceID = nil
-                    model.selectedCategory = nil
-                    model.selectedSection = .sources
-                } label: {
-                    Label("管理 \(model.sources.count) 个来源", systemImage: "ellipsis")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(SidebarRowStyle(selected: model.selectedSection == .sources))
-
-                SidebarHeading("每日更新")
-                HStack(spacing: 9) {
-                    Image(systemName: "clock")
-                    Text("Codex 每天 07:30")
-                    Spacer()
-                }
-                .foregroundStyle(FieldNotesTheme.muted)
-                .padding(.horizontal, 10).frame(height: 30)
-                Button {
-                    model.selectedSourceID = nil
-                    model.selectedCategory = nil
-                    model.selectedSection = .processing
-                } label: {
-                    HStack(spacing: 9) {
-                        Image(systemName: model.processingCount == 0 ? "checkmark" : "arrow.triangle.2.circlepath")
-                        Text(model.processingCount == 0 ? "最近运行" : "处理中")
-                        Spacer()
-                        if model.processingCount > 0 { Text("\(model.processingCount)") }
-                    }
-                }
-                .buttonStyle(SidebarRowStyle(selected: model.selectedSection == .processing))
+                .padding(10)
             }
-            .padding(10)
+            Divider()
+            DailyUpdateFooter()
         }
         .background(FieldNotesTheme.chrome)
     }
@@ -168,6 +160,66 @@ struct LibrarySidebar: View {
         case "商业报道": Color.orange.opacity(0.76)
         default: Color.pink.opacity(0.68)
         }
+    }
+}
+
+private struct DailyUpdateFooter: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        Button {
+            model.selectedSourceID = nil
+            model.selectedCategory = nil
+            model.selectedSection = .processing
+        } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Text("每日更新")
+                        .font(.system(size: 10, weight: .semibold))
+                        .tracking(0.7)
+                        .foregroundStyle(FieldNotesTheme.muted)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                Label("每天 07:30 自动执行", systemImage: "clock")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(FieldNotesTheme.ink)
+
+                if let run = model.dailyStatusRun {
+                    HStack(spacing: 6) {
+                        Image(systemName: statusSymbol(run))
+                            .foregroundStyle(run.status == "complete" && run.failedCount == 0 ? FieldNotesTheme.action : FieldNotesTheme.amber)
+                        Text(run.statusLabel).fontWeight(.semibold)
+                    }
+                    .font(.system(size: 12))
+                    Text(run.status == "running" ? (run.currentDetail ?? "正在处理…") : "完成于 \(run.finishedTimeLabel)")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(FieldNotesTheme.muted)
+                        .lineLimit(1)
+                    Text("发现 \(run.discoveredCount) · 整理 \(run.completedCount) · 失败 \(run.failedCount)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(FieldNotesTheme.muted)
+                } else {
+                    Text("尚无更新记录")
+                        .font(.system(size: 11))
+                        .foregroundStyle(FieldNotesTheme.muted)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 13)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(model.selectedSection == .processing ? FieldNotesTheme.selected.opacity(0.72) : Color.clear)
+    }
+
+    private func statusSymbol(_ run: PipelineRun) -> String {
+        if run.status == "running" { return "arrow.triangle.2.circlepath" }
+        if run.status == "complete" && run.failedCount == 0 { return "checkmark.circle.fill" }
+        return "exclamationmark.triangle.fill"
     }
 }
 
@@ -411,8 +463,8 @@ struct ReaderWorkspace: View {
                     case .transcript: TranscriptView(episode: episode)
                     }
                 }
-                // A ScrollView must belong to one episode. Otherwise SwiftUI
-                // reuses the previous episode's offset when the selection changes.
+                // Separate identities prevent positions leaking across episodes;
+                // each page restores its own persisted offset inside the view.
                 .id("\(episode.id)-\(model.readerMode.rawValue)")
                 .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
@@ -433,6 +485,8 @@ struct ReadingView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
+                ScrollPositionMemory(key: "\(episode.id).reading")
+                    .frame(height: 0)
                 VStack(alignment: .leading, spacing: 0) {
                     EpisodeThumbnail(url: episode.thumbnailURL)
                         .frame(maxWidth: .infinity)
@@ -765,6 +819,10 @@ struct TranscriptView: View {
                             Divider()
                         }
                     }
+                    .background {
+                        ScrollPositionMemory(key: "\(episode.id).transcript")
+                            .frame(width: 0, height: 0)
+                    }
                     .frame(maxWidth: 980).padding(.horizontal, 28).padding(.bottom, 80)
                     .frame(maxWidth: .infinity)
                 }
@@ -844,13 +902,15 @@ struct ProcessingView: View {
                 ForEach(model.runs) { run in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
-                            Label(run.status == "complete" && run.failedCount > 0 ? "更新完成，有失败" : run.status == "complete" ? "更新完成" : run.status == "running" ? "正在更新" : "更新失败",
+                            Label(run.statusLabel,
                                   systemImage: run.status == "complete" && run.failedCount == 0 ? "checkmark.circle" : run.status == "running" ? "arrow.clockwise" : "exclamationmark.triangle")
                                 .fontWeight(.semibold)
                             Spacer()
-                            Text(run.startedAt.prefix(16)).font(.caption).foregroundStyle(.secondary)
+                            Text(run.scheduleLabel).font(.caption).foregroundStyle(.secondary)
                         }
-                        Text(run.currentDetail ?? "").font(.caption).foregroundStyle(.secondary)
+                        Text("开始 \(run.startedTimeLabel)").font(.caption).foregroundStyle(.secondary)
+                        Text(run.status == "running" ? (run.currentDetail ?? "正在处理…") : "完成 \(run.finishedTimeLabel)")
+                            .font(.caption).foregroundStyle(.secondary)
                         Text("新增 \(run.discoveredCount) · 完成 \(run.completedCount) · 无字幕 \(run.noTranscriptCount) · 失败 \(run.failedCount)")
                             .font(.caption2).foregroundStyle(FieldNotesTheme.muted)
                     }

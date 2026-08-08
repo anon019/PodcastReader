@@ -28,8 +28,16 @@ final class AppModel: ObservableObject {
     init() {
         let storedFontSize = UserDefaults.standard.double(forKey: "readerFontSize")
         readerFontSize = storedFontSize >= 15 && storedFontSize <= 22 ? storedFontSize : 17
+        loadLibraryAtLaunch()
+    }
+
+    private func loadLibraryAtLaunch() {
+        let databaseExists = FileManager.default.fileExists(atPath: PodcastDatabase.shared.path.path)
         do {
-            _ = try PipelineRunner.runSync(["init"])
+            // The Codex schedule already writes the complete library. Existing
+            // installations open directly from SQLite instead of waiting for a
+            // Python process before presenting today's finished episodes.
+            if !databaseExists { _ = try PipelineRunner.runSync(["init"]) }
             reload()
         } catch {
             errorMessage = error.localizedDescription
@@ -69,6 +77,12 @@ final class AppModel: ObservableObject {
 
     var processingCount: Int { episodes.filter { ["discovered", "transcript_fetching", "transcript_ready", "analyzing"].contains($0.status) }.count }
     var noTranscriptCount: Int { episodes.filter { $0.status == "no_transcript" }.count }
+    var latestRun: PipelineRun? { runs.first }
+    var dailyStatusRun: PipelineRun? {
+        runs.first(where: { $0.status == "running" })
+            ?? runs.first(where: { $0.trigger == "codex_schedule" })
+            ?? latestRun
+    }
 
     func reload() {
         refreshLibrary(forceDetail: true)

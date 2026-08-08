@@ -199,4 +199,44 @@ struct PipelineRun: Identifiable, Hashable {
     let failedCount: Int
     let currentDetail: String?
     let error: String?
+
+    var startedDate: Date? { Self.parseDate(startedAt) }
+    var finishedDate: Date? { finishedAt.flatMap(Self.parseDate) }
+
+    var statusLabel: String {
+        switch status {
+        case "running": "正在更新"
+        case "complete" where failedCount == 0: "更新完成"
+        case "complete": "完成，有失败"
+        default: "更新失败"
+        }
+    }
+
+    var scheduleLabel: String {
+        trigger == "codex_schedule" ? "每日自动更新" : trigger == "manual" ? "手动检查" : "来源更新"
+    }
+
+    var startedTimeLabel: String { startedDate.map(Self.preciseFormatter.string) ?? startedAt }
+    var finishedTimeLabel: String { finishedDate.map(Self.preciseFormatter.string) ?? "尚未完成" }
+
+    private static func parseDate(_ value: String) -> Date? {
+        if let date = ISO8601DateFormatter().date(from: value) { return date }
+        return sqliteDateFormatter.date(from: value)
+    }
+
+    private static let sqliteDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter
+    }()
+
+    private static let preciseFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = .current
+        formatter.dateFormat = "MM.dd HH:mm:ss"
+        return formatter
+    }()
 }
