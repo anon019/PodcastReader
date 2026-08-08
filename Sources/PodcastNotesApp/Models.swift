@@ -56,6 +56,7 @@ struct Episode: Identifiable, Hashable {
     var thumbnailURL: String
     var publishedAt: String
     var organizedAt: String?
+    var createdAt: String
     var durationSeconds: Int?
     var status: String
     var isRead: Bool
@@ -76,9 +77,10 @@ struct Episode: Identifiable, Hashable {
 
     var publishedDate: Date? { Self.parseDate(publishedAt) }
     var organizedDate: Date? { organizedAt.flatMap(Self.parseDate) }
+    var createdDate: Date? { Self.parseDate(createdAt) }
 
-    var publishedDayLabel: String { publishedDate.map(Self.dayFormatter.string) ?? "未知" }
-    var organizedDayLabel: String { organizedDate.map(Self.dayFormatter.string) ?? "尚未整理" }
+    var publishedDayLabel: String { publishedDate.map(Self.preciseFormatter.string) ?? "未知" }
+    var organizedDayLabel: String { organizedDate.map(Self.preciseFormatter.string) ?? "尚未整理" }
 
     var publishedFreshnessLabel: String {
         guard let publishedDate else { return "发布时间未知" }
@@ -101,10 +103,11 @@ struct Episode: Identifiable, Hashable {
         return formatter
     }()
 
-    private static let dayFormatter: DateFormatter = {
+    private static let preciseFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "yyyy.MM.dd"
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy.MM.dd HH:mm:ss"
         return formatter
     }()
 
@@ -161,6 +164,7 @@ struct EpisodeAnalysis: Codable, Hashable {
 
     let priority: String
     let oneSentence: String
+    let coreSummary: String?
     let participants: [Participant]
     let topics: [Topic]
     let keyInsights: [Insight]
@@ -168,6 +172,19 @@ struct EpisodeAnalysis: Codable, Hashable {
     let evidenceLimits: [String]
     let nextQuestions: [String]
     let guestSources: [GuestSource]
+
+    var displayedCoreSummary: String {
+        if let coreSummary = coreSummary?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !coreSummary.isEmpty {
+            return coreSummary
+        }
+        let legacySummary = topics
+            .map(\.summary)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return legacySummary.isEmpty ? oneSentence : legacySummary
+    }
 }
 
 struct PipelineRun: Identifiable, Hashable {

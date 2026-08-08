@@ -2,10 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["priority", "oneSentence", "participants", "topics", "keyInsights", "extensions", "evidenceLimits", "nextQuestions", "guestSources"],
+  "required": ["priority", "oneSentence", "coreSummary", "participants", "topics", "keyInsights", "extensions", "evidenceLimits", "nextQuestions", "guestSources"],
   "properties": {
     "priority": {"type": "string", "enum": ["must_read", "worth_reading", "skim", "archive"]},
     "oneSentence": {"type": "string"},
+    "coreSummary": {"type": "string", "minLength": 1},
     "participants": {
       "type": "array",
       "minItems": 1,

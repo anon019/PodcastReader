@@ -23,6 +23,7 @@ final class AppModel: ObservableObject {
     @Published var isShowingAddSheet = false
 
     private let decoder = JSONDecoder()
+    private var ownsUpdateTask = false
 
     init() {
         let storedFontSize = UserDefaults.standard.double(forKey: "readerFontSize")
@@ -49,8 +50,8 @@ final class AppModel: ObservableObject {
             if selectedSourceID != nil || selectedCategory != nil { return true }
             switch selectedSection {
             case .today:
-                guard let date = episode.publishedDate else { return true }
-                return calendar.isDateInToday(date) || calendar.isDateInYesterday(date)
+                guard let date = episode.createdDate ?? episode.organizedDate ?? episode.publishedDate else { return true }
+                return calendar.isDateInToday(date)
             case .unread: return !episode.isRead
             case .sources: return true
             case .processing: return !["complete", "no_transcript"].contains(episode.status)
@@ -61,7 +62,7 @@ final class AppModel: ObservableObject {
     var unreadCount: Int { episodes.filter { !$0.isRead }.count }
     var todayCount: Int {
         episodes.filter { episode in
-            guard let date = episode.publishedDate else { return false }
+            guard let date = episode.createdDate ?? episode.organizedDate ?? episode.publishedDate else { return false }
             return Calendar.current.isDateInToday(date)
         }.count
     }
@@ -70,14 +71,35 @@ final class AppModel: ObservableObject {
     var noTranscriptCount: Int { episodes.filter { $0.status == "no_transcript" }.count }
 
     func reload() {
+        refreshLibrary(forceDetail: true)
+    }
+
+    func refreshLibrary() {
+        refreshLibrary(forceDetail: false)
+    }
+
+    private func refreshLibrary(forceDetail: Bool) {
         do {
+            let previousEpisodeID = selectedEpisodeID
+            let previousStatus = episodes.first(where: { $0.id == previousEpisodeID })?.status
             sources = try PodcastDatabase.shared.loadSources()
             episodes = try PodcastDatabase.shared.loadEpisodes()
             runs = try PodcastDatabase.shared.loadRuns()
             if selectedEpisodeID == nil || !episodes.contains(where: { $0.id == selectedEpisodeID }) {
                 selectedEpisodeID = filteredEpisodes.first?.id ?? episodes.first?.id
             }
-            loadSelectedDetail()
+            let currentStatus = episodes.first(where: { $0.id == selectedEpisodeID })?.status
+            let hasRunningPipeline = runs.contains(where: { $0.status == "running" })
+            if forceDetail || previousEpisodeID != selectedEpisodeID || previousStatus != currentStatus
+                || (readerMode == .transcript && hasRunningPipeline) {
+                loadSelectedDetail()
+            }
+            if let running = runs.first(where: { $0.status == "running" }) {
+                isUpdating = true
+                updateMessage = running.currentDetail ?? "正在更新…"
+            } else if !ownsUpdateTask {
+                isUpdating = false
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -113,7 +135,11 @@ final class AppModel: ObservableObject {
     }
 
     func checkForUpdates() {
+        // Scheduled runs write SQLite outside the App process. Refresh first so
+        // completed content appears immediately, before starting any new scan.
+        refreshLibrary()
         guard !isUpdating else { return }
+        ownsUpdateTask = true
         isUpdating = true
         updateMessage = "正在检查 \(sources.filter(\.enabled).count) 个订阅源…"
         errorMessage = nil
@@ -131,6 +157,7 @@ final class AppModel: ObservableObject {
                 updateMessage = "更新失败"
                 reload()
             }
+            ownsUpdateTask = false
             isUpdating = false
         }
     }
@@ -138,6 +165,7 @@ final class AppModel: ObservableObject {
     func addURL(_ url: String) {
         let value = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
+        ownsUpdateTask = true
         isUpdating = true
         updateMessage = "正在添加链接…"
         Task {
@@ -162,12 +190,14 @@ final class AppModel: ObservableObject {
                 errorMessage = error.localizedDescription
                 updateMessage = "添加失败"
             }
+            ownsUpdateTask = false
             isUpdating = false
         }
     }
 
     func retrySelected() {
         guard let id = selectedEpisode?.id else { return }
+        ownsUpdateTask = true
         isUpdating = true
         updateMessage = "正在重新处理本期…"
         Task {
@@ -180,12 +210,14 @@ final class AppModel: ObservableObject {
                 errorMessage = error.localizedDescription
                 updateMessage = "重试失败"
             }
+            ownsUpdateTask = false
             isUpdating = false
         }
     }
 
     func translateSelected() {
         guard let id = selectedEpisode?.id else { return }
+        ownsUpdateTask = true
         isUpdating = true
         updateMessage = "正在翻译完整 Transcript…"
         Task {
@@ -197,6 +229,7 @@ final class AppModel: ObservableObject {
                 errorMessage = error.localizedDescription
                 updateMessage = "翻译失败"
             }
+            ownsUpdateTask = false
             isUpdating = false
         }
     }

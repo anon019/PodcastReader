@@ -1,5 +1,6 @@
 import datetime as dt
 import importlib.util
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -50,6 +51,17 @@ class PipelineTests(unittest.TestCase):
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(episodes)")}
         self.assertNotIn("note", columns)
         self.assertNotIn("is_highlighted", columns)
+
+    def test_analysis_contract_requires_a_core_summary(self):
+        schema = json.loads((RESOURCES / "analysis-schema.json").read_text(encoding="utf-8"))
+        self.assertIn("coreSummary", schema["required"])
+        prompt = pipeline.analysis_prompt(
+            {"title": "Episode", "url": "https://example.invalid"},
+            {"name": "Source", "id": "source", "profile_version": "2.0.0", "profile_prompt": "Profile"},
+            "Transcript text",
+        )
+        self.assertIn("coreSummary", prompt)
+        self.assertIn("一个自然段", prompt)
 
     def test_discovery_is_incremental_and_idempotent(self):
         self.enable_only()
@@ -164,7 +176,7 @@ class PipelineTests(unittest.TestCase):
         )
         self.db.commit()
         analysis = {
-            "priority": "worth_reading", "oneSentence": "Summary", "participants": [],
+            "priority": "worth_reading", "oneSentence": "Summary", "coreSummary": "Core summary", "participants": [],
             "topics": [], "keyInsights": [], "extensions": [], "evidenceLimits": [],
             "nextQuestions": [], "guestSources": [],
         }

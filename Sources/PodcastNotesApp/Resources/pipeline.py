@@ -581,6 +581,7 @@ def analysis_prompt(episode: sqlite3.Row, source: sqlite3.Row, transcript: str) 
 7. 去掉广告、寒暄、重复表达和空泛励志内容；不给出未经请求的投资建议。
 8. 按成熟媒体编辑稿的方式写作，语言自然、直接、可连续阅读。禁止在 topics、keyPoints、keyInsights 的正文中反复使用“字幕转述：”“字幕事实：”“主持人判断：”“主持人同时限定：”“嘉宾判断：”“我的归纳：”“反方解释：”“关键限定：”或方括号证据标签。事实与观点的边界通过 speaker、confidence、时间戳以及独立的 evidenceLimits 表达，不要把分类标签写进每句话。
 9. 合并重复论述。每个 topic 的 keyPoints 保留 3–6 条真正改变理解的内容；一句只表达一个完整意思，优先写结论、数字、条件和影响，不写分析过程的自我说明。
+10. oneSentence 只写一句最核心的判断。coreSummary 紧随其后，用一个自然段高度凝练整期内容，覆盖主要问题、关键结论、重要分歧或限制以及为何值得关注；不要使用项目符号、小标题、分析过程标签，也不要简单重复 oneSentence。
 
 来源：{source['name']}
 标题：{episode['title']}
@@ -870,8 +871,9 @@ def run_update(args: argparse.Namespace, db: sqlite3.Connection, resources: Path
                     "SELECT id FROM episodes WHERE status IN ('failed','no_transcript') ORDER BY published_at DESC LIMIT 100"
                 )]
         if not args.discover_only:
-            for index, episode_id in enumerate(dict.fromkeys(targets), start=1):
-                db.execute("UPDATE runs SET current_detail=? WHERE id=?", (f"正在处理 {index}/{len(targets)}", run_id))
+            unique_targets = list(dict.fromkeys(targets))
+            for index, episode_id in enumerate(unique_targets, start=1):
+                db.execute("UPDATE runs SET current_detail=? WHERE id=?", (f"正在处理 {index}/{len(unique_targets)}", run_id))
                 db.commit()
                 state = process_episode(db, episode_id, resources, analyze=not args.transcript_only)
                 if state == "complete":

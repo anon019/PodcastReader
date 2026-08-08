@@ -46,6 +46,16 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $model.isShowingAddSheet) { AddLinkSheet() }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                guard !Task.isCancelled else { break }
+                model.refreshLibrary()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.refreshLibrary()
+        }
         .alert("Podcast Reader", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -401,7 +411,9 @@ struct ReaderWorkspace: View {
                     case .transcript: TranscriptView(episode: episode)
                     }
                 }
-                .id(model.readerMode)
+                // A ScrollView must belong to one episode. Otherwise SwiftUI
+                // reuses the previous episode's offset when the selection changes.
+                .id("\(episode.id)-\(model.readerMode.rawValue)")
                 .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
             .background(FieldNotesTheme.paper)
@@ -529,6 +541,13 @@ struct AnalysisArticle: View {
             .overlay(alignment: .leading) {
                 Capsule().fill(FieldNotesTheme.action).frame(width: 4).padding(.vertical, 18)
             }
+
+            ArticleLabel("核心摘要", symbol: "text.alignleft")
+            Text(analysis.displayedCoreSummary.readerEditorialText)
+                .font(.readerBody(model.readerFontSize))
+                .lineSpacing(8)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
 
             ArticleLabel("主持人与嘉宾", symbol: "person.2")
             ForEach(analysis.participants) { participant in

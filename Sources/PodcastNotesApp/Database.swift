@@ -101,7 +101,7 @@ final class PodcastDatabase {
         try withDatabase { db in
             try rows(db, sql: """
                 SELECT e.id,e.source_id,e.title,e.url,e.thumbnail_url,e.published_at,e.organized_at,
-                       e.duration_seconds,e.status,e.is_read,e.transcript_error,e.error,
+                       e.created_at,e.duration_seconds,e.status,e.is_read,e.transcript_error,e.error,
                        s.name AS source_name
                 FROM episodes e
                 JOIN sources s ON s.id=e.source_id
@@ -112,6 +112,7 @@ final class PodcastDatabase {
                         id: row.string("id"), sourceID: row.string("source_id"), sourceName: row.string("source_name"),
                         title: row.string("title"), url: row.string("url"), thumbnailURL: row.string("thumbnail_url"),
                         publishedAt: row.string("published_at"), organizedAt: row.optionalString("organized_at"),
+                        createdAt: row.string("created_at"),
                         durationSeconds: row.optionalInt("duration_seconds"),
                         status: row.string("status"), isRead: row.int("is_read") == 1,
                         transcriptError: row.optionalString("transcript_error"), error: row.optionalString("error")
