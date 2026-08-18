@@ -74,6 +74,7 @@ class PipelineTests(unittest.TestCase):
             pipeline.subprocess.CompletedProcess([], 0, "YouTube views: 10\n\nTranscript:\n" + transcript, ""),
         ]
         with mock.patch.object(pipeline, "youtube_caption_extraction_enabled", return_value=True), \
+             mock.patch.object(pipeline.Path, "exists", return_value=True), \
              mock.patch.object(pipeline.subprocess, "run", side_effect=results) as run:
             text, segments = pipeline.fetch_transcript({
                 "url": "https://www.youtube.com/watch?v=Fallback01",
