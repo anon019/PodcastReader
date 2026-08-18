@@ -1,6 +1,8 @@
 # Podcast Reader
 
-Personal, local-first macOS reader for structured Podcast extraction. It is a reader, not a note-taking app.
+Open-source, local-first macOS reader for structured Podcast extraction. It is a reader, not a note-taking app.
+
+The app ships with 21 public YouTube Podcast sources and their source-specific editorial prompts. It is designed for personal use and does not redistribute Podcast Transcripts or analysis databases.
 
 ## Installed app
 
@@ -14,9 +16,10 @@ The toolbar provides optional one-shot manual update and add-link actions. Suppo
 ## Runtime contract
 
 - YouTube RSS and channel pages discover episodes.
-- `/opt/homebrew/bin/summarize` 0.21.8 or later reads YouTube caption tracks; its Homebrew `yt-dlp` dependency provides the transcript-only fallback.
+- YouTube caption extraction is disabled in a fresh public checkout. After reviewing [LEGAL.md](LEGAL.md), an authorized user may explicitly enable the user-installed `/opt/homebrew/bin/summarize` path; its Homebrew `yt-dlp` dependency provides the transcript-only fallback.
 - Audio is never downloaded and no ASR backend is called. Caption extraction first uses YouTube's low-cost web transcript, then falls back to `yt-dlp` for YouTube's own subtitle track; missing or incomplete captions become `no_transcript` with a visible reason.
-- `/opt/homebrew/bin/codex exec -m gpt-5.6-luna` performs source-specific extraction and bilingual translation. Content calls use Luna's default reasoning configuration; the Codex automation itself uses `max` reasoning effort.
+- A newly published episode with no caption track is shown as `字幕生成中` for 72 hours. The reader immediately presents the official description, guest card, and Show Notes chapters as a clearly labeled preview; daily retries replace that preview with the full Transcript, translation, and structured analysis once captions appear.
+- `/opt/homebrew/bin/codex exec -m gpt-5.6-luna` performs source-specific extraction and bilingual translation. Content calls use Luna's default reasoning configuration; a separately configured Codex automation may use `max` reasoning effort.
 - Original Transcript, Chinese translation, participant research, topic map, core insights, evidence limits, and source links are saved in local SQLite.
 - The reading order is one-sentence takeaway, one-paragraph core summary, participants, topic map, core insights, evidence, and bilingual Transcript. Original publication and local organization timestamps are shown to the second in the Mac's current time zone.
 - The sidebar keeps a compact receipt for the 07:30 Codex schedule, including current status, exact completion time, and run counts. Each episode and reader mode persists its own exact scroll offset across selection changes and App launches.
@@ -25,6 +28,14 @@ The toolbar provides optional one-shot manual update and add-link actions. Suppo
 - New subscriptions automatically receive a Luna-generated source profile; users never manage prompts.
 
 The code and installed runtime do not read or write Hermes files, databases, prompts, jobs, logs, Notion state, or Telegram state.
+
+## Public-repository boundaries
+
+- MIT covers the source and original App Icon. See [LICENSE](LICENSE) and [ASSETS.md](ASSETS.md).
+- Podcast content remains owned by its publishers. Review [LEGAL.md](LEGAL.md) before enabling caption extraction.
+- “Local-first” does not mean fully offline: Transcript content is sent through the user's authenticated Codex CLI. See [PRIVACY.md](PRIVACY.md).
+- Report vulnerabilities privately according to [SECURITY.md](SECURITY.md).
+- Runtime dependencies and licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Build and install
 
@@ -45,7 +56,7 @@ scripts/install_personal_app.sh
 scripts/verify.sh
 ```
 
-This runs the Swift build with warnings treated as errors, Python syntax checks, thirteen isolated pipeline tests, shell syntax validation, source-catalog validation, plist validation, and installed-app signature verification when present.
+This runs the Swift build with warnings treated as errors, Python syntax checks, isolated pipeline tests, shell syntax validation, source-catalog validation, plist validation, and installed-app signature verification when present.
 
 ## Main source files
 

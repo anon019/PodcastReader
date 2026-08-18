@@ -54,6 +54,7 @@ struct Episode: Identifiable, Hashable {
     var title: String
     var url: String
     var thumbnailURL: String
+    var description: String
     var publishedAt: String
     var organizedAt: String?
     var createdAt: String
@@ -69,7 +70,7 @@ struct Episode: Identifiable, Hashable {
         case "analyzing": "提炼中"
         case "transcript_fetching": "取字幕"
         case "transcript_ready": "字幕就绪"
-        case "no_transcript": "暂无字幕"
+        case "no_transcript": isFreshCaptionPending ? "字幕生成中" : "暂无字幕"
         case "failed": "需重试"
         default: "待处理"
         }
@@ -88,6 +89,23 @@ struct Episode: Identifiable, Hashable {
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.unitsStyle = .full
         return formatter.localizedString(for: publishedDate, relativeTo: .now)
+    }
+
+    var hasOfficialPreview: Bool {
+        status == "no_transcript" && !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var isFreshCaptionPending: Bool {
+        guard status == "no_transcript", let publishedDate else { return false }
+        let age = Date().timeIntervalSince(publishedDate)
+        return age >= 0 && age <= 72 * 60 * 60
+    }
+
+    var transcriptAvailabilityMessage: String {
+        if isFreshCaptionPending {
+            return "这期刚发布，YouTube 尚未生成可用字幕。官方简介与章节已经保留；每日更新会自动重试，字幕出现后会替换为完整提炼。"
+        }
+        return transcriptError ?? "YouTube 尚未提供可用 Transcript；后续更新仍会自动重试。"
     }
 
     private static func parseDate(_ value: String) -> Date? {

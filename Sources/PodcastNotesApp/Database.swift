@@ -100,7 +100,7 @@ final class PodcastDatabase {
     func loadEpisodes() throws -> [Episode] {
         try withDatabase { db in
             try rows(db, sql: """
-                SELECT e.id,e.source_id,e.title,e.url,e.thumbnail_url,e.published_at,e.organized_at,
+                SELECT e.id,e.source_id,e.title,e.url,e.thumbnail_url,e.description,e.published_at,e.organized_at,
                        e.created_at,e.duration_seconds,e.status,e.is_read,e.transcript_error,e.error,
                        s.name AS source_name
                 FROM episodes e
@@ -111,6 +111,7 @@ final class PodcastDatabase {
                     Episode(
                         id: row.string("id"), sourceID: row.string("source_id"), sourceName: row.string("source_name"),
                         title: row.string("title"), url: row.string("url"), thumbnailURL: row.string("thumbnail_url"),
+                        description: row.string("description"),
                         publishedAt: row.string("published_at"), organizedAt: row.optionalString("organized_at"),
                         createdAt: row.string("created_at"),
                         durationSeconds: row.optionalInt("duration_seconds"),

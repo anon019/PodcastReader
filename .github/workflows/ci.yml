@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: |
+          swift --version
+          python3 --version
+          xcrun --show-sdk-path
+      - name: Verify
+        run: PODCAST_NOTES_MACOS_SDK="$(xcrun --show-sdk-path)" scripts/verify.sh

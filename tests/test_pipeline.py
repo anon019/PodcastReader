@@ -73,7 +73,8 @@ class PipelineTests(unittest.TestCase):
             pipeline.subprocess.CompletedProcess([], 0, description, ""),
             pipeline.subprocess.CompletedProcess([], 0, "YouTube views: 10\n\nTranscript:\n" + transcript, ""),
         ]
-        with mock.patch.object(pipeline.subprocess, "run", side_effect=results) as run:
+        with mock.patch.object(pipeline, "youtube_caption_extraction_enabled", return_value=True), \
+             mock.patch.object(pipeline.subprocess, "run", side_effect=results) as run:
             text, segments = pipeline.fetch_transcript({
                 "url": "https://www.youtube.com/watch?v=Fallback01",
                 "duration_seconds": 900,
@@ -86,6 +87,16 @@ class PipelineTests(unittest.TestCase):
             "--video-mode" in call.args[0] and "transcript" in call.args[0]
             for call in run.call_args_list
         ))
+
+    def test_transcript_extraction_is_disabled_without_explicit_local_opt_in(self):
+        with mock.patch.object(pipeline, "youtube_caption_extraction_enabled", return_value=False), \
+             mock.patch.object(pipeline.subprocess, "run") as run:
+            with self.assertRaisesRegex(RuntimeError, "默认关闭"):
+                pipeline.fetch_transcript({
+                    "url": "https://www.youtube.com/watch?v=ManualVid01",
+                    "duration_seconds": 900,
+                })
+        run.assert_not_called()
 
     def test_discovery_is_incremental_and_idempotent(self):
         self.enable_only()
@@ -250,6 +261,59 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["kind"], "episode")
         self.assertEqual(row["published_at"], "2024-02-03T00:00:00+00:00")
         self.assertEqual(row["duration_seconds"], 1800)
+
+    def test_add_url_rejects_non_youtube_origins_before_network_access(self):
+        rejected = [
+            "file:///tmp/fake-youtube-channel.html",
+            "http://www.youtube.com/@channel",
+            "https://127.0.0.1/@channel",
+            "https://localhost/@channel",
+            "https://169.254.169.254/latest/meta-data",
+            "https://10.0.0.1/@channel",
+            "https://youtube.com.evil.example/watch?v=ManualVid01",
+            "https://www.youtube.com@evil.example/watch?v=ManualVid01",
+            "https://www.youtube.com:8443/watch?v=ManualVid01",
+        ]
+        with mock.patch.object(pipeline.YOUTUBE_OPENER, "open") as network:
+            for url in rejected:
+                with self.subTest(url=url), self.assertRaises(ValueError):
+                    pipeline.add_url(self.db, url, RESOURCES)
+        network.assert_not_called()
+
+    def test_add_url_accepts_supported_youtube_video_origins(self):
+        accepted = [
+            "https://www.youtube.com/watch?v=ManualVid01",
+            "https://youtube.com/shorts/ManualVid01",
+            "https://m.youtube.com/live/ManualVid01",
+            "https://youtu.be/ManualVid01",
+        ]
+        for url in accepted:
+            with self.subTest(url=url), \
+                 mock.patch.object(pipeline, "oembed", return_value={"title": "Manual episode"}), \
+                 mock.patch.object(pipeline, "published_from_page", return_value="2024-02-03T00:00:00+00:00"), \
+                 mock.patch.object(pipeline, "duration_from_page", return_value=1800):
+                result = pipeline.add_url(self.db, url, RESOURCES)
+                self.assertEqual(result, {"kind": "episode", "id": "ManualVid01"})
+
+    def test_redirect_policy_revalidates_every_target(self):
+        handler = pipeline.YouTubeRedirectHandler()
+        request = pipeline.urllib.request.Request("https://www.youtube.com/@channel")
+        with mock.patch.object(
+            pipeline.urllib.request.HTTPRedirectHandler, "redirect_request", return_value="accepted"
+        ) as parent:
+            result = handler.redirect_request(
+                request, None, 302, "Found", {}, "https://www.youtube.com/channel/UC12345678901234567890"
+            )
+            self.assertEqual(result, "accepted")
+            parent.assert_called_once()
+        for target in (
+            "file:///tmp/redirected.html",
+            "http://www.youtube.com/@channel",
+            "https://127.0.0.1/internal",
+            "https://youtube.com.evil.example/@channel",
+        ):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                handler.redirect_request(request, None, 302, "Found", {}, target)
 
 
 if __name__ == "__main__":

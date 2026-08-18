@@ -543,6 +543,8 @@ struct ReadingView: View {
 
                 if let analysis = model.selectedAnalysis {
                     AnalysisArticle(analysis: analysis)
+                } else if episode.hasOfficialPreview {
+                    OfficialPreviewView(episode: episode)
                 } else {
                     PendingAnalysisView(episode: episode)
                 }
@@ -778,13 +780,138 @@ struct PendingAnalysisView: View {
         VStack(spacing: 14) {
             Image(systemName: episode.status == "no_transcript" ? "captions.bubble" : "text.magnifyingglass")
                 .font(.system(size: 30)).foregroundStyle(FieldNotesTheme.action)
-            Text(episode.status == "no_transcript" ? "YouTube 暂无可用 Transcript" : "本期尚未完成整理")
+            Text(episode.isFreshCaptionPending ? "YouTube 字幕生成中" : episode.status == "no_transcript" ? "YouTube 暂无可用 Transcript" : "本期尚未完成整理")
                 .font(.fieldTitle(22))
-            Text(episode.transcriptError ?? episode.error ?? "下一次更新会按来源专属 Profile 获取字幕并使用 Luna 分析。")
+            Text(episode.status == "no_transcript" ? episode.transcriptAvailabilityMessage : episode.error ?? "下一次更新会按来源专属 Profile 获取字幕并使用 Luna 分析。")
                 .foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 460)
             Button("现在处理") { model.retrySelected() }.buttonStyle(.borderedProminent).tint(FieldNotesTheme.action)
         }
         .frame(maxWidth: .infinity).padding(60)
+    }
+}
+
+private struct OfficialPreviewView: View {
+    @EnvironmentObject private var model: AppModel
+    let episode: Episode
+
+    private struct Chapter: Identifiable {
+        let time: String
+        let title: String
+        var id: String { time + title }
+    }
+
+    private var lines: [String] {
+        episode.description.components(separatedBy: .newlines)
+    }
+
+    private var overview: String {
+        var result: [String] = []
+        for rawLine in lines {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("嘉宾资料") || line.hasPrefix("本集时码") || line.hasPrefix("Show Notes") { break }
+            if !line.isEmpty && !line.hasPrefix("#") { result.append(line) }
+        }
+        return result.joined(separator: "\n\n")
+    }
+
+    private var guestDetails: [String] {
+        var collecting = false
+        var result: [String] = []
+        for rawLine in lines {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("嘉宾资料") {
+                collecting = true
+                continue
+            }
+            if line.hasPrefix("本集时码") || line.hasPrefix("Show Notes") { break }
+            if collecting && !line.isEmpty { result.append(line) }
+        }
+        return result
+    }
+
+    private var chapters: [Chapter] {
+        lines.compactMap { rawLine in
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            let parts = line.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            guard parts.count == 2 else { return nil }
+            let timestamp = String(parts[0])
+            let timeParts = timestamp.split(separator: ":")
+            guard (2...3).contains(timeParts.count), timeParts.allSatisfy({ Int($0) != nil }) else { return nil }
+            return Chapter(time: timestamp, title: String(parts[1]))
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("官方内容预览", systemImage: "captions.bubble")
+                    .font(.readerBodySemibold(13))
+                    .foregroundStyle(FieldNotesTheme.amber)
+                Text("字幕生成中，先看官方简介与章节")
+                    .font(.readerDisplay(model.readerFontSize + 7))
+                    .lineSpacing(8)
+                Text(episode.transcriptAvailabilityMessage)
+                    .font(.readerBody(max(14, model.readerFontSize - 1)))
+                    .foregroundStyle(FieldNotesTheme.muted)
+                    .lineSpacing(5)
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(FieldNotesTheme.amber.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
+            .overlay(alignment: .leading) {
+                Capsule().fill(FieldNotesTheme.amber).frame(width: 4).padding(.vertical, 18)
+            }
+
+            if !overview.isEmpty {
+                ArticleLabel("本期内容", symbol: "text.alignleft")
+                Text(overview)
+                    .font(.readerBody(model.readerFontSize))
+                    .lineSpacing(8)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !guestDetails.isEmpty {
+                ArticleLabel("官方嘉宾资料", symbol: "person.crop.circle")
+                Text(guestDetails.joined(separator: "\n"))
+                    .font(.readerBody(model.readerFontSize))
+                    .lineSpacing(7)
+                    .textSelection(.enabled)
+                    .padding(18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(FieldNotesTheme.surface.opacity(0.76), in: RoundedRectangle(cornerRadius: 11))
+                    .overlay(RoundedRectangle(cornerRadius: 11).stroke(FieldNotesTheme.divider.opacity(0.72), lineWidth: 1))
+            }
+
+            if !chapters.isEmpty {
+                ArticleLabel("官方章节", symbol: "list.bullet.rectangle")
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(chapters) { chapter in
+                        HStack(alignment: .firstTextBaseline, spacing: 16) {
+                            Text(chapter.time)
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(FieldNotesTheme.action)
+                                .frame(width: 54, alignment: .leading)
+                            Text(chapter.title)
+                                .font(.readerBody(model.readerFontSize))
+                                .lineSpacing(5)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.vertical, 10)
+                        if chapter.id != chapters.last?.id { Divider().padding(.leading, 70) }
+                    }
+                }
+            }
+
+            Text("以上仅来自节目官方简介，不是 Transcript 提炼。完整字幕可用后，系统会自动生成原文、翻译和结构化分析。")
+                .font(.readerBody(max(13, model.readerFontSize - 2)))
+                .foregroundStyle(FieldNotesTheme.muted)
+                .padding(.top, 34)
+        }
+        .frame(maxWidth: 780, alignment: .leading)
+        .foregroundStyle(FieldNotesTheme.bodyText)
+        .padding(.horizontal, 42).padding(.top, 24).padding(.bottom, 96)
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -809,7 +936,7 @@ struct TranscriptView: View {
             .padding(14)
             Divider()
             if model.segments.isEmpty {
-                ContentUnavailableView("没有 Transcript", systemImage: "captions.bubble", description: Text(episode.transcriptError ?? "等待字幕获取。"))
+                ContentUnavailableView("没有 Transcript", systemImage: "captions.bubble", description: Text(episode.transcriptAvailabilityMessage))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {

@@ -25,7 +25,9 @@ from typing import Any, Iterable
 
 APP_ID = "com.sota.PodcastNotes"
 USER_AGENT = "PodcastReader/0.4 (personal macOS reader)"
-YOUTUBE_VIDEO_RE = re.compile(r"(?:youtu\.be/|youtube\.com/(?:watch\?.*?v=|shorts/|live/))([A-Za-z0-9_-]{11})")
+ALLOWED_YOUTUBE_HOSTS = frozenset({"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"})
+YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+YOUTUBE_PLAYLIST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,100}$")
 TIMESTAMP_RE = re.compile(r"^\s*\[(?P<time>\d{1,2}:\d{2}(?::\d{2})?)\]\s*(?P<text>.*)$")
 ANALYSIS_STYLE_VERSION = "editorial-2.1"
 
@@ -38,13 +40,62 @@ def default_db_path() -> Path:
     return Path.home() / "Library" / "Application Support" / "PodcastNotes" / "podcast_notes.sqlite3"
 
 
+def youtube_caption_extraction_enabled() -> bool:
+    """Require an explicit local opt-in; public builds do not enable extraction."""
+    if os.environ.get("PODCAST_READER_ENABLE_YOUTUBE_CAPTIONS") == "1":
+        return True
+    marker = (
+        Path.home() / "Library" / "Application Support" / "PodcastNotes"
+        / "allow-youtube-caption-extraction"
+    )
+    return marker.is_file()
+
+
+def validate_youtube_url(url: str) -> urllib.parse.SplitResult:
+    """Accept only ordinary HTTPS URLs on the supported YouTube origins."""
+    if not isinstance(url, str) or not url or len(url) > 4096:
+        raise ValueError("请输入有效的 YouTube HTTPS 链接")
+    if any(ord(char) < 32 or ord(char) == 127 for char in url):
+        raise ValueError("YouTube 链接不能包含控制字符")
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("YouTube 链接格式无效") from exc
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme.lower() != "https":
+        raise ValueError("只允许 HTTPS YouTube 链接")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("YouTube 链接不能包含用户名或密码")
+    if port not in {None, 443}:
+        raise ValueError("YouTube 链接不能使用自定义端口")
+    if host not in ALLOWED_YOUTUBE_HOSTS:
+        raise ValueError("只允许 youtube.com 或 youtu.be 官方域名")
+    return parsed
+
+
+class YouTubeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Apply the same origin policy to every redirect before following it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        validate_youtube_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+YOUTUBE_OPENER = urllib.request.build_opener(YouTubeRedirectHandler())
+
+
 def http_get(url: str, timeout: int = 30) -> bytes:
+    validate_youtube_url(url)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.8"})
     last_error: Exception | None = None
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with YOUTUBE_OPENER.open(request, timeout=timeout) as response:
+                validate_youtube_url(response.geturl())
                 return response.read()
+        except ValueError:
+            raise
         except Exception as exc:
             last_error = exc
             if isinstance(exc, urllib.error.HTTPError) and exc.code not in {408, 429, 500, 502, 503, 504}:
@@ -553,6 +604,10 @@ def clean_transcript_output(text: str) -> str:
 
 
 def fetch_transcript(episode: sqlite3.Row) -> tuple[str, list[tuple[str, float | None, str]]]:
+    if not youtube_caption_extraction_enabled():
+        raise RuntimeError(
+            "YouTube 字幕提取默认关闭；请先阅读 LEGAL.md，并在本机明确启用后重试"
+        )
     summarize = Path("/opt/homebrew/bin/summarize")
     if not summarize.exists():
         raise RuntimeError("未找到 /opt/homebrew/bin/summarize")
@@ -799,6 +854,19 @@ def oembed(video_url: str) -> dict[str, Any]:
     return json.loads(http_get(url).decode("utf-8"))
 
 
+def youtube_video_id(parsed: urllib.parse.SplitResult) -> str | None:
+    host = (parsed.hostname or "").lower()
+    parts = [part for part in parsed.path.split("/") if part]
+    candidate: str | None = None
+    if host == "youtu.be" and parts:
+        candidate = parts[0]
+    elif parsed.path.rstrip("/") == "/watch":
+        candidate = (urllib.parse.parse_qs(parsed.query).get("v") or [None])[0]
+    elif len(parts) >= 2 and parts[0] in {"shorts", "live", "embed"}:
+        candidate = parts[1]
+    return candidate if candidate and YOUTUBE_VIDEO_ID_RE.fullmatch(candidate) else None
+
+
 def resolve_channel(url: str) -> tuple[str, str]:
     parsed = urllib.parse.urlparse(url)
     path = parsed.path.strip("/")
@@ -814,10 +882,11 @@ def resolve_channel(url: str) -> tuple[str, str]:
 
 
 def add_url(db: sqlite3.Connection, url: str, resources: Path) -> dict[str, Any]:
+    url = url.strip()
+    parsed = validate_youtube_url(url)
     now = utc_now()
-    video_match = YOUTUBE_VIDEO_RE.search(url)
-    if video_match:
-        video_id = video_match.group(1)
+    video_id = youtube_video_id(parsed)
+    if video_id:
         canonical = f"https://www.youtube.com/watch?v={video_id}"
         metadata = oembed(canonical)
         published = published_from_page(video_id) or now
@@ -836,9 +905,11 @@ def add_url(db: sqlite3.Connection, url: str, resources: Path) -> dict[str, Any]
                     "discovered", now, now))
         db.commit()
         return {"kind": "episode", "id": video_id}
-    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    query = urllib.parse.parse_qs(parsed.query)
     playlist = (query.get("list") or [None])[0]
     if playlist:
+        if not YOUTUBE_PLAYLIST_ID_RE.fullmatch(playlist):
+            raise ValueError("YouTube Playlist ID 格式无效")
         source_id = f"playlist-{playlist}"
         db.execute("""INSERT INTO sources(id,name,handle,kind,external_id,feed_url,category,min_duration,profile_version,profile_prompt,created_at,updated_at)
                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=1,archived=0,updated_at=excluded.updated_at""",
@@ -852,7 +923,7 @@ def add_url(db: sqlite3.Connection, url: str, resources: Path) -> dict[str, Any]
     source_id = "channel-" + channel_id.lower()
     db.execute("""INSERT INTO sources(id,name,handle,kind,external_id,feed_url,category,min_duration,profile_version,profile_prompt,created_at,updated_at)
                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=1,archived=0,updated_at=excluded.updated_at""",
-               (source_id, name, urllib.parse.urlparse(url).path.strip("/"), "channel", channel_id,
+               (source_id, name, parsed.path.strip("/"), "channel", channel_id,
                 f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}", "未分类", 0, "1.0.0",
                 "识别节目定位，提炼核心观点、嘉宾背景、引申意义、证据限制和下一验证点。", now, now))
     db.commit()
