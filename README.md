@@ -11,7 +11,7 @@ The app ships with 21 public YouTube Podcast sources and their source-specific e
 - Schedule: Codex automation `Podcast Reader 每日增量更新`, every day at 07:30 local time
 - Runtime: one scheduled run starts, updates the local library, and exits; there is no LaunchAgent, login item, helper, API server, or resident process
 
-The toolbar provides optional one-shot manual update and add-link actions. Supported links are YouTube channels, playlists, and individual episodes. On launch, an existing library is read directly from SQLite, so a completed scheduled run is already visible without clicking refresh. Appearance can follow macOS or be pinned to light/dark mode. While open, the reader observes lightweight SQLite changes every ten seconds so scheduled content and progress appear without restarting.
+The toolbar provides optional one-shot manual update and add-link actions. Supported links are YouTube channels, playlists, and individual episodes. On launch, an existing library is read directly from SQLite, so a completed scheduled run is already visible without clicking refresh. Appearance can follow macOS or be pinned to light/dark mode. While open, the reader checks SQLite data_version on a retained connection every ten seconds and reloads only after an external commit so scheduled content and progress appear without restarting.
 
 ## Runtime contract
 
@@ -24,7 +24,7 @@ The toolbar provides optional one-shot manual update and add-link actions. Suppo
 - The reading order is one-sentence takeaway, one-paragraph core summary, participants, topic map, core insights, evidence, and bilingual Transcript. Original publication and local organization timestamps are shown to the second in the Mac's current time zone.
 - The sidebar keeps a compact receipt for the 07:30 Codex schedule, including current status, exact completion time, and run counts. Each episode and reader mode persists its own exact scroll offset across selection changes and App launches.
 - Every manual or scheduled update completes discovery, extraction, and any missing translation before the one-shot worker exits.
-- Daily discovery looks back 30 days but only accepts items newer than each source's local publish-time watermark, deduplicates by YouTube video ID, retries failed/missing-caption items, and records source-level failures in the run receipt.
+- Daily discovery looks back 30 days but accepts unseen items at or after each source's local publish-time watermark, deduplicates by YouTube video ID, retries failed/missing-caption items, and records source-level failures in the run receipt.
 - New subscriptions automatically receive a Luna-generated source profile; users never manage prompts.
 
 The code and installed runtime do not read or write Hermes files, databases, prompts, jobs, logs, Notion state, or Telegram state.
@@ -56,7 +56,7 @@ scripts/install_personal_app.sh
 scripts/verify.sh
 ```
 
-This runs the Swift build with warnings treated as errors, Python syntax checks, isolated pipeline tests, shell syntax validation, source-catalog validation, plist validation, and installed-app signature verification when present.
+This runs the Swift build with warnings treated as errors, five isolated Swift reader/database regression checks, Python syntax checks, isolated pipeline tests, shell syntax validation, source-catalog validation, plist validation, and installed-app signature verification when present.
 
 ## Main source files
 
@@ -66,3 +66,12 @@ This runs the Swift build with warnings treated as errors, Python syntax checks,
 - `Assets/AppIcon-master-v2.png` and `Assets/AppIcon.icns`: transparent, borderless production macOS icon.
 - `PRODUCT_SPEC.md`: current product, data, automation, and acceptance contract.
 - `SOURCE_PROFILES.md`: research rationale behind the 21 source-specific extraction profiles; the executable profile text lives in `seed_sources.json`.
+
+## Reliability and performance (0.7.1)
+
+- All one-shot CLI writers share a database-specific OS lock, including manual processing, source management, and scheduled updates. A busy worker exits 75; filesystem or processing failures exit nonzero rather than reporting a successful skip. The lock file remains on disk; ownership is released by the OS when the worker exits. Do not delete this file to unlock a running worker.
+- The same update receipt covers source-profile retries, discovery, analysis, and the existing translation backlog. Disabled or archived subscriptions are excluded from automatic processing. Interrupted extraction/analysis resumes on the next update; abandoned run receipts are marked interrupted after lock acquisition.
+- Incremental batches at or above an existing source watermark process older unseen items first, so the per-source limit does not silently skip the remaining newer feed items. Initial subscriptions still start with the latest items; the upstream feed/window limit still applies.
+- Translation batches are validated in full before commit; duplicate, missing, foreign, or empty segment results remain retryable. Successful earlier batches are retained. Manual processing no longer invokes translation twice.
+- Library reads share a SQLite snapshot. Unchanged polling avoids full list scans and redundant SwiftUI publication; translated content refreshes even if episode status does not change. Custom source categories appear automatically and empty Today lists no longer select an unrelated old episode at launch.
+- `PODCAST_NOTES_DB` can point the app and daily script at an isolated library for local acceptance checks. The worker CLI also accepts `--db`.

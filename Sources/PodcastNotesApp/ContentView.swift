@@ -80,10 +80,13 @@ struct ContentView: View {
 struct LibrarySidebar: View {
     @EnvironmentObject private var model: AppModel
 
-    private let categories = [
+    private var categories: [String] {
+        let defaults = [
         "投资与市场", "AI 与基础设施", "创业与产品", "人物访谈",
         "工程实践", "科学与推理", "历史与宏观", "商业报道", "科技新闻"
-    ]
+        ]
+        return defaults + Set(model.sources.map(\.category)).subtracting(defaults).sorted()
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -784,7 +787,7 @@ struct PendingAnalysisView: View {
                 .font(.fieldTitle(22))
             Text(episode.status == "no_transcript" ? episode.transcriptAvailabilityMessage : episode.error ?? "下一次更新会按来源专属 Profile 获取字幕并使用 Luna 分析。")
                 .foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 460)
-            Button("现在处理") { model.retrySelected() }.buttonStyle(.borderedProminent).tint(FieldNotesTheme.action)
+            Button("现在处理") { model.retrySelected() }.disabled(model.isUpdating).buttonStyle(.borderedProminent).tint(FieldNotesTheme.action)
         }
         .frame(maxWidth: .infinity).padding(60)
     }
@@ -847,7 +850,7 @@ private struct OfficialPreviewView: View {
                 Label("官方内容预览", systemImage: "captions.bubble")
                     .font(.readerBodySemibold(13))
                     .foregroundStyle(FieldNotesTheme.amber)
-                Text("字幕生成中，先看官方简介与章节")
+                Text(episode.isFreshCaptionPending ? "字幕生成中，先看官方简介与章节" : "暂无可用字幕，先看官方简介与章节")
                     .font(.readerDisplay(model.readerFontSize + 7))
                     .lineSpacing(8)
                 Text(episode.transcriptAvailabilityMessage)

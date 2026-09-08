@@ -20,22 +20,51 @@ final class PodcastDatabase {
     static let shared = PodcastDatabase()
     let path: URL
 
-    private init() {
+    private var handle: OpaquePointer?
+
+    init(path: URL? = nil) {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        path = base.appendingPathComponent("PodcastNotes/podcast_notes.sqlite3")
+        self.path = (path ?? ProcessInfo.processInfo.environment["PODCAST_NOTES_DB"].map { URL(fileURLWithPath: $0) }
+            ?? base.appendingPathComponent("PodcastNotes/podcast_notes.sqlite3")).resolvingSymlinksInPath()
     }
 
     private func withDatabase<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
-        try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let handle { return try body(handle) }
         var handle: OpaquePointer?
-        guard sqlite3_open(path.path, &handle) == SQLITE_OK, let handle else {
+        guard sqlite3_open_v2(path.path, &handle, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK, let handle else {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "无法打开数据库"
             if let handle { sqlite3_close(handle) }
             throw DatabaseError.open(message)
         }
-        defer { sqlite3_close(handle) }
+        self.handle = handle
         sqlite3_busy_timeout(handle, 3000)
         return try body(handle)
+    }
+
+    func close() {
+        if let handle { sqlite3_close(handle) }
+        handle = nil
+    }
+
+    /// data_version is meaningful only on the same retained connection.
+    func dataVersion() throws -> Int {
+        try withDatabase { db in
+            try rows(db, sql: "PRAGMA data_version").first?.int("data_version") ?? 0
+        }
+    }
+
+    func loadLibrary() throws -> (sources: [Source], episodes: [Episode], runs: [PipelineRun]) {
+        try withDatabase { db in
+            try execute(db, sql: "BEGIN", values: [])
+            do {
+                let result = (try loadSources(), try loadEpisodes(), try loadRuns())
+                try execute(db, sql: "COMMIT", values: [])
+                return result
+            } catch {
+                try? execute(db, sql: "ROLLBACK", values: [])
+                throw error
+            }
+        }
     }
 
     private func rows(_ db: OpaquePointer, sql: String, bind: ((OpaquePointer) -> Void)? = nil) throws -> [[String: Any?]] {
@@ -81,7 +110,7 @@ final class PodcastDatabase {
     func loadSources() throws -> [Source] {
         try withDatabase { db in
             try rows(db, sql: """
-                SELECT s.*, SUM(CASE WHEN e.is_read=0 THEN 1 ELSE 0 END) AS unread_count
+                SELECT s.*, SUM(CASE WHEN e.is_read=0 AND (s.kind!='channel' OR e.duration_seconds IS NULL OR e.duration_seconds>=s.min_duration) THEN 1 ELSE 0 END) AS unread_count
                 FROM sources s LEFT JOIN episodes e ON e.source_id=s.id
                 WHERE s.archived=0
                 GROUP BY s.id ORDER BY s.category,s.name

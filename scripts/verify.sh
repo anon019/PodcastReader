@@ -19,9 +19,15 @@ if [[ "${PODCAST_NOTES_DISABLE_SWIFTPM_SANDBOX:-0}" == "1" ]]; then
 fi
 
 swift build "${swift_args[@]}" -Xswiftc -warnings-as-errors
+# Standalone harness works with Command Line Tools as well as full Xcode.
+swiftc -swift-version 6 -parse-as-library -warnings-as-errors -I Sources/CSQLite \
+  -module-cache-path "$CLANG_MODULE_CACHE_PATH" \
+  Sources/PodcastNotesApp/{Database,Models,AppModel,PipelineRunner}.swift \
+  tests/Swift/DatabaseTests.swift -o .build/reader-regression-tests
+.build/reader-regression-tests
 python3 -m py_compile Sources/PodcastNotesApp/Resources/pipeline.py
 python3 -m unittest discover -s tests -p 'test_*.py'
-zsh -n scripts/daily_update.sh scripts/build_app.sh scripts/install_personal_app.sh
+for script in scripts/*.sh; do zsh -n "$script"; done
 jq -e 'length == 21 and ([.[].id] | unique | length == 21)' Sources/PodcastNotesApp/Resources/seed_sources.json >/dev/null
 plutil -lint App/Info.plist >/dev/null
 

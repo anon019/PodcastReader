@@ -8,6 +8,7 @@ import concurrent.futures
 import contextlib
 import datetime as dt
 import hashlib
+import fcntl
 import json
 import os
 import re
@@ -104,6 +105,36 @@ def http_get(url: str, timeout: int = 30) -> bytes:
                 time.sleep(1.5 * (attempt + 1))
     assert last_error is not None
     raise last_error
+
+
+class WorkerBusyError(RuntimeError):
+    pass
+
+
+@contextlib.contextmanager
+def worker_lock(path: Path):
+    """One OS-owned lock for every CLI writer; never unlink a flock inode."""
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Respect an already-running pre-upgrade daily wrapper.
+    legacy = path.parent / ".daily-update.lock" / "pid"
+    if legacy.is_file():
+        try:
+            pid = int(legacy.read_text().strip())
+            if pid > 0:
+                os.kill(pid, 0)
+                raise WorkerBusyError("另一个旧版更新任务正在运行，请等待其结束")
+        except (ValueError, ProcessLookupError, FileNotFoundError):
+            pass
+    with path.with_suffix(path.suffix + ".worker.lock").open("a+") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise WorkerBusyError("另一个更新任务正在运行，请稍后重试") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -374,8 +405,10 @@ def discover(
             candidates = parse_feed(source, lookback_days, max(15, per_source))
             recent_candidates = [
                 item for item in candidates
-                if watermark is None or iso_date(item["published"]) > watermark
+                if watermark is None or iso_date(item["published"]) >= watermark
             ]
+            if watermark is not None:
+                recent_candidates.sort(key=lambda item: iso_date(item["published"]))
             durations = candidate_durations(db, recent_candidates)
             for item in recent_candidates:
                 existing = db.execute("SELECT 1 FROM episodes WHERE id=?", (item["id"],)).fetchone()
@@ -424,10 +457,10 @@ def discover(
                     )
                     new_ids.append(item["id"])
                     break
-            db.execute("UPDATE sources SET last_checked_at=?,health='healthy',last_error=NULL,updated_at=? WHERE id=?", (utc_now(), utc_now(), source["id"]))
+            db.execute("UPDATE sources SET last_checked_at=?,health=CASE WHEN health='profile_pending' THEN health ELSE 'healthy' END,last_error=CASE WHEN health='profile_pending' THEN last_error ELSE NULL END,updated_at=? WHERE id=?", (utc_now(), utc_now(), source["id"]))
         except Exception as exc:
             failures.append(source["id"])
-            db.execute("UPDATE sources SET last_checked_at=?,health='error',last_error=?,updated_at=? WHERE id=?", (utc_now(), str(exc)[:1000], utc_now(), source["id"]))
+            db.execute("UPDATE sources SET last_checked_at=?,health=CASE WHEN health='profile_pending' THEN health ELSE 'error' END,last_error=?,updated_at=? WHERE id=?", (utc_now(), str(exc)[:1000], utc_now(), source["id"]))
         db.commit()
     return new_ids, failures
 
@@ -515,14 +548,14 @@ def discover_latest_each_source(
                 inserted += 1
             targets.append({"sourceId": source["id"], "sourceName": source["name"], "episodeId": item["id"], "title": item["title"]})
             db.execute(
-                "UPDATE sources SET last_checked_at=?,health='healthy',last_error=NULL,updated_at=? WHERE id=?",
+                "UPDATE sources SET last_checked_at=?,health=CASE WHEN health='profile_pending' THEN health ELSE 'healthy' END,last_error=CASE WHEN health='profile_pending' THEN last_error ELSE NULL END,updated_at=? WHERE id=?",
                 (now, now, source["id"]),
             )
         except Exception as exc:
             message = str(exc)[:1000]
             failures.append({"sourceId": source["id"], "sourceName": source["name"], "error": message})
             db.execute(
-                "UPDATE sources SET last_checked_at=?,health='error',last_error=?,updated_at=? WHERE id=?",
+                "UPDATE sources SET last_checked_at=?,health=CASE WHEN health='profile_pending' THEN health ELSE 'error' END,last_error=?,updated_at=? WHERE id=?",
                 (utc_now(), message, utc_now(), source["id"]),
             )
         db.commit()
@@ -603,7 +636,7 @@ def clean_transcript_output(text: str) -> str:
     ).strip()
 
 
-def fetch_transcript(episode: sqlite3.Row) -> tuple[str, list[tuple[str, float | None, str]]]:
+def fetch_transcript(episode: sqlite3.Row) -> tuple[str, list[tuple[str, float | None, str]], str]:
     if not youtube_caption_extraction_enabled():
         raise RuntimeError(
             "YouTube 字幕提取默认关闭；请先阅读 LEGAL.md，并在本机明确启用后重试"
@@ -636,7 +669,7 @@ def fetch_transcript(episode: sqlite3.Row) -> tuple[str, list[tuple[str, float |
             segments = parse_transcript(transcript)
             if not segments:
                 segments = [("", None, transcript)]
-            return transcript, segments
+            return transcript, segments, "youtube_web" if mode == "web" else "youtube_ytdlp"
         if looks_like_description:
             receipts.append(f"{mode} 只返回 {len(transcript)} 字的简介/章节")
         else:
@@ -768,16 +801,16 @@ def process_episode(db: sqlite3.Connection, episode_id: str, resources: Path, an
         if not episode["transcript_text"]:
             db.execute("UPDATE episodes SET status='transcript_fetching',error=NULL,updated_at=? WHERE id=?", (utc_now(), episode_id))
             db.commit()
-            transcript, segments = fetch_transcript(episode)
+            transcript, segments, transcript_source = fetch_transcript(episode)
             digest = hashlib.sha256(transcript.encode("utf-8")).hexdigest()
             db.execute("DELETE FROM transcript_segments WHERE episode_id=?", (episode_id,))
             for position, (stamp, seconds, text) in enumerate(segments):
                 db.execute("INSERT INTO transcript_segments(episode_id,position,timestamp,start_seconds,original_text) VALUES(?,?,?,?,?)",
                            (episode_id, position, stamp, seconds, text))
             language = transcript_language(transcript)
-            db.execute("""UPDATE episodes SET transcript_text=?,transcript_hash=?,transcript_source='youtube_web',
+            db.execute("""UPDATE episodes SET transcript_text=?,transcript_hash=?,transcript_source=?,
                           transcript_language=?,transcript_error=NULL,status='transcript_ready',updated_at=? WHERE id=?""",
-                       (transcript, digest, language, utc_now(), episode_id))
+                       (transcript, digest, transcript_source, language, utc_now(), episode_id))
             db.commit()
         if not analyze:
             return "transcript_ready"
@@ -794,6 +827,7 @@ def process_episode(db: sqlite3.Connection, episode_id: str, resources: Path, an
         return "complete"
     except Exception as exc:
         message = str(exc)[:4000]
+        db.rollback()
         current = db.execute("SELECT status FROM episodes WHERE id=?", (episode_id,)).fetchone()[0]
         if current == "transcript_fetching":
             db.execute("UPDATE episodes SET status='no_transcript',transcript_error=?,error=NULL,updated_at=? WHERE id=?", (message, utc_now(), episode_id))
@@ -819,7 +853,7 @@ def translate_episode(db: sqlite3.Connection, episode_id: str, resources: Path) 
     if episode["transcript_language"] == "zh" or transcript_language(episode["transcript_text"]) == "zh":
         cursor = db.execute(
             """UPDATE transcript_segments SET translated_text=original_text
-               WHERE episode_id=? AND translated_text IS NULL""", (episode_id,)
+               WHERE episode_id=? AND (translated_text IS NULL OR trim(translated_text)='')""", (episode_id,)
         )
         db.execute("UPDATE episodes SET transcript_language='zh',updated_at=? WHERE id=?", (utc_now(), episode_id))
         db.execute("""UPDATE episodes SET error=NULL WHERE id=? AND error LIKE '翻译待重试:%'""", (episode_id,))
@@ -827,23 +861,28 @@ def translate_episode(db: sqlite3.Connection, episode_id: str, resources: Path) 
         return cursor.rowcount
     count = 0
     while True:
-        pending = db.execute("""SELECT * FROM transcript_segments WHERE episode_id=? AND translated_text IS NULL
+        pending = db.execute("""SELECT * FROM transcript_segments WHERE episode_id=? AND (translated_text IS NULL OR trim(translated_text)='')
                               ORDER BY position LIMIT 40""", (episode_id,)).fetchall()
         if not pending:
             break
         expected_ids = {row["id"] for row in pending}
         result = run_codex(translation_prompt(pending), resources, "translation-schema.json", timeout=900)
-        progressed = 0
-        for item in result.get("translations", []):
-            if item.get("segmentId") not in expected_ids or not item.get("translatedText", "").strip():
-                continue
-            db.execute("UPDATE transcript_segments SET translated_text=? WHERE id=? AND episode_id=?",
-                       (item["translatedText"], item["segmentId"], episode_id))
-            progressed += 1
-        db.commit()
-        if progressed == 0:
-            raise RuntimeError("翻译结果没有覆盖请求的 segmentId；已停止，原文不受影响")
-        count += progressed
+        translations = result.get("translations", [])
+        validated = {}
+        for item in translations:
+            segment_id = item.get("segmentId")
+            text = item.get("translatedText")
+            if (type(segment_id) is not int or segment_id not in expected_ids
+                    or segment_id in validated or not isinstance(text, str) or not text.strip()):
+                raise RuntimeError("翻译结果包含重复、未知或空白段落；本批次未写入，可安全重试")
+            validated[segment_id] = text.strip()
+        if set(validated) != expected_ids:
+            raise RuntimeError("翻译结果没有完整覆盖请求的 segmentId；本批次未写入，可安全重试")
+        with db:
+            db.executemany("UPDATE transcript_segments SET translated_text=? WHERE id=? AND episode_id=?",
+                           [(text, segment_id, episode_id) for segment_id, text in validated.items()])
+            db.execute("UPDATE episodes SET updated_at=? WHERE id=?", (utc_now(), episode_id))
+        count += len(validated)
     db.execute("""UPDATE episodes SET error=NULL WHERE id=? AND error LIKE '翻译待重试:%'""", (episode_id,))
     db.commit()
     return count
@@ -940,33 +979,29 @@ def run_update(args: argparse.Namespace, db: sqlite3.Connection, resources: Path
     counts = {"discovered": 0, "completed": 0, "noTranscript": 0, "failed": 0}
     try:
         source_filter = {args.source_id} if args.source_id else None
+        if not args.discover_only:
+            for source in db.execute("""SELECT id FROM sources WHERE enabled=1 AND archived=0
+                                       AND health='profile_pending' AND (? IS NULL OR id=?)""",
+                                     (args.source_id, args.source_id)).fetchall():
+                profile = auto_profile_source(db, source[0], resources)
+                if profile["status"] != "complete":
+                    counts["failed"] += 1
         new_ids, source_failures = discover(db, args.lookback_days, args.per_source, run_id, source_filter)
         counts["discovered"] = len(new_ids)
         counts["failed"] += len(source_failures)
         targets = list(new_ids)
-        # A discovery-only first run or an interrupted worker may leave valid
-        # episodes waiting. Daily/manual updates must drain that backlog instead
-        # of only processing IDs discovered in the current scan.
-        if args.source_id:
-            targets += [row[0] for row in db.execute(
-                """SELECT id FROM episodes WHERE source_id=? AND status IN ('discovered','transcript_ready')
-                   ORDER BY published_at DESC LIMIT 100""", (args.source_id,)
-            )]
-        else:
-            targets += [row[0] for row in db.execute(
-                """SELECT id FROM episodes WHERE status IN ('discovered','transcript_ready')
-                   ORDER BY published_at DESC LIMIT 100"""
-            )]
+        states = ["discovered", "transcript_ready", "transcript_fetching", "analyzing"]
         if args.retry_failed:
-            if args.source_id:
-                targets += [row[0] for row in db.execute(
-                    """SELECT id FROM episodes WHERE source_id=? AND status IN ('failed','no_transcript')
-                       ORDER BY published_at DESC LIMIT 100""", (args.source_id,)
-                )]
-            else:
-                targets += [row[0] for row in db.execute(
-                    "SELECT id FROM episodes WHERE status IN ('failed','no_transcript') ORDER BY published_at DESC LIMIT 100"
-                )]
+            states += ["failed", "no_transcript"]
+        placeholders = ",".join("?" for _ in states)
+        targets += [row[0] for row in db.execute(
+            f"""SELECT e.id FROM episodes e JOIN sources s ON s.id=e.source_id
+                WHERE s.enabled=1 AND s.archived=0 AND e.status IN ({placeholders})
+                  AND (? IS NULL OR e.source_id=?)
+                ORDER BY e.published_at DESC LIMIT 100""",
+            (*states, args.source_id, args.source_id),
+        )]
+        translation_attempted = set()
         if not args.discover_only:
             unique_targets = list(dict.fromkeys(targets))
             for index, episode_id in enumerate(unique_targets, start=1):
@@ -977,6 +1012,7 @@ def run_update(args: argparse.Namespace, db: sqlite3.Connection, resources: Path
                     counts["completed"] += 1
                     if not args.transcript_only:
                         try:
+                            translation_attempted.add(episode_id)
                             translate_episode(db, episode_id, resources)
                         except Exception as exc:
                             # Analysis and original transcript remain complete.
@@ -989,13 +1025,41 @@ def run_update(args: argparse.Namespace, db: sqlite3.Connection, resources: Path
                             db.commit()
                 elif state == "no_transcript": counts["noTranscript"] += 1
                 elif state == "failed": counts["failed"] += 1
+        if not args.discover_only and not args.transcript_only:
+            # Shared by manual and scheduled updates. Keep the receipt running
+            # until the complete library's translation backlog has been checked.
+            pending = db.execute(
+                """SELECT e.id FROM episodes e JOIN sources s ON s.id=e.source_id
+                   WHERE e.status='complete' AND s.enabled=1 AND s.archived=0
+                     AND (? IS NULL OR e.source_id=?) AND EXISTS (
+                       SELECT 1 FROM transcript_segments t WHERE t.episode_id=e.id
+                         AND (t.translated_text IS NULL OR trim(t.translated_text)=''))
+                   ORDER BY e.published_at DESC""", (args.source_id, args.source_id),
+            ).fetchall()
+            for row in pending:
+                episode_id = row[0]
+                if episode_id in translation_attempted:
+                    continue
+                db.execute("UPDATE runs SET current_detail=? WHERE id=?", (f"正在补齐翻译 · {episode_id}", run_id))
+                db.commit()
+                try:
+                    translate_episode(db, episode_id, resources)
+                except Exception as exc:
+                    counts["failed"] += 1
+                    db.execute("UPDATE episodes SET error=?,updated_at=? WHERE id=?",
+                               (f"翻译待重试: {str(exc)[:3500]}", utc_now(), episode_id))
+                    db.commit()
         db.execute("""UPDATE runs SET finished_at=?,status='complete',discovered_count=?,completed_count=?,
                       no_transcript_count=?,failed_count=?,current_detail='更新完成' WHERE id=?""",
                    (utc_now(), counts["discovered"], counts["completed"], counts["noTranscript"], counts["failed"], run_id))
         db.commit()
         return {"runId": run_id, **counts}
     except Exception as exc:
-        db.execute("UPDATE runs SET finished_at=?,status='failed',error=?,current_detail='更新失败' WHERE id=?", (utc_now(), str(exc)[:4000], run_id))
+        db.rollback()
+        db.execute("""UPDATE runs SET finished_at=?,status='failed',error=?,current_detail='更新失败',
+                      discovered_count=?,completed_count=?,no_transcript_count=?,failed_count=? WHERE id=?""",
+                   (utc_now(), str(exc)[:4000], counts["discovered"], counts["completed"],
+                    counts["noTranscript"], counts["failed"] + 1, run_id))
         db.commit()
         raise
 
@@ -1039,8 +1103,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    db = connect(args.db)
-    init_database(db, args.resources)
+    args.db = args.db.expanduser().resolve()
+    with worker_lock(args.db):
+        with contextlib.closing(connect(args.db)) as db:
+            init_database(db, args.resources)
+            db.execute("""UPDATE runs SET status='failed',finished_at=?,current_detail='上次更新已中断',
+                          error='工作进程已退出；下次更新将从已保存阶段继续' WHERE status='running'""", (utc_now(),))
+            db.commit()
+            return dispatch(args, db)
+
+
+def dispatch(args: argparse.Namespace, db: sqlite3.Connection) -> int:
     if args.command == "init":
         result: Any = {"database": str(args.db), "sources": db.execute("SELECT COUNT(*) FROM sources").fetchone()[0]}
     elif args.command == "latest-each-source":
@@ -1070,12 +1143,15 @@ def main() -> int:
     else:
         raise AssertionError(args.command)
     print(json.dumps(result, ensure_ascii=False))
-    return 0
+    return 1 if isinstance(result, dict) and (result.get("status") == "failed" or result.get("failed", 0)) else 0
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except WorkerBusyError as error:
+        print(json.dumps({"status": "busy", "error": str(error)}, ensure_ascii=False), file=sys.stderr)
+        raise SystemExit(75)
     except Exception as error:
         print(json.dumps({"error": str(error)}, ensure_ascii=False), file=sys.stderr)
         raise SystemExit(1)

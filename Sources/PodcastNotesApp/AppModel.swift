@@ -24,15 +24,19 @@ final class AppModel: ObservableObject {
 
     private let decoder = JSONDecoder()
     private var ownsUpdateTask = false
+    private var lastDataVersion: Int?
+    private var lastRefreshDay: Date?
+    private let database: PodcastDatabase
 
-    init() {
+    init(database: PodcastDatabase = .shared) {
+        self.database = database
         let storedFontSize = UserDefaults.standard.double(forKey: "readerFontSize")
         readerFontSize = storedFontSize >= 15 && storedFontSize <= 22 ? storedFontSize : 17
         loadLibraryAtLaunch()
     }
 
     private func loadLibraryAtLaunch() {
-        let databaseExists = FileManager.default.fileExists(atPath: PodcastDatabase.shared.path.path)
+        let databaseExists = FileManager.default.fileExists(atPath: database.path.path)
         do {
             // The Codex schedule already writes the complete library. Existing
             // installations open directly from SQLite instead of waiting for a
@@ -94,25 +98,29 @@ final class AppModel: ObservableObject {
 
     private func refreshLibrary(forceDetail: Bool) {
         do {
+            let version = try database.dataVersion()
+            let day = Calendar.current.startOfDay(for: .now)
+            let workerRunning = ownsUpdateTask || PipelineRunner.workerIsRunning(databaseURL: database.path)
+            guard forceDetail || version != lastDataVersion || day != lastRefreshDay || workerRunning != isUpdating else { return }
             let previousEpisodeID = selectedEpisodeID
-            let previousStatus = episodes.first(where: { $0.id == previousEpisodeID })?.status
-            sources = try PodcastDatabase.shared.loadSources()
-            episodes = try PodcastDatabase.shared.loadEpisodes()
-            runs = try PodcastDatabase.shared.loadRuns()
+            let library = try database.loadLibrary()
+            if sources != library.sources { sources = library.sources }
+            if episodes != library.episodes { episodes = library.episodes }
+            if runs != library.runs { runs = library.runs }
             if selectedEpisodeID == nil || !episodes.contains(where: { $0.id == selectedEpisodeID }) {
-                selectedEpisodeID = filteredEpisodes.first?.id ?? episodes.first?.id
+                selectedEpisodeID = filteredEpisodes.first?.id
             }
-            let currentStatus = episodes.first(where: { $0.id == selectedEpisodeID })?.status
-            let hasRunningPipeline = runs.contains(where: { $0.status == "running" })
-            if forceDetail || previousEpisodeID != selectedEpisodeID || previousStatus != currentStatus
-                || (readerMode == .transcript && hasRunningPipeline) {
+            if forceDetail || previousEpisodeID != selectedEpisodeID || version != lastDataVersion {
                 loadSelectedDetail()
             }
-            if let running = runs.first(where: { $0.status == "running" }) {
+            lastDataVersion = version
+            lastRefreshDay = day
+            if workerRunning, let running = runs.first(where: { $0.status == "running" }) {
                 isUpdating = true
                 updateMessage = running.currentDetail ?? "正在更新…"
             } else if !ownsUpdateTask {
-                isUpdating = false
+                isUpdating = workerRunning
+                if workerRunning { updateMessage = "后台任务正在处理…" }
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -139,12 +147,16 @@ final class AppModel: ObservableObject {
             selectedAnalysis = nil
             return
         }
-        segments = (try? PodcastDatabase.shared.loadSegments(episodeID: id)) ?? []
-        if let json = try? PodcastDatabase.shared.loadAnalysisJSON(episodeID: id),
-           let data = json.data(using: .utf8) {
-            selectedAnalysis = try? decoder.decode(EpisodeAnalysis.self, from: data)
-        } else {
+        do {
+            let loadedSegments = try database.loadSegments(episodeID: id)
+            let json = try database.loadAnalysisJSON(episodeID: id)
+            let analysis = try json.map { try decoder.decode(EpisodeAnalysis.self, from: Data($0.utf8)) }
+            if segments != loadedSegments { segments = loadedSegments }
+            if selectedAnalysis != analysis { selectedAnalysis = analysis }
+        } catch {
+            segments = []
             selectedAnalysis = nil
+            errorMessage = "读取本期内容失败：\(error.localizedDescription)"
         }
     }
 
@@ -177,6 +189,8 @@ final class AppModel: ObservableObject {
     }
 
     func addURL(_ url: String) {
+        guard !isUpdating else { return }
+        errorMessage = nil
         let value = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
         ownsUpdateTask = true
@@ -189,7 +203,6 @@ final class AppModel: ObservableObject {
                    let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     if let episodeID = object["id"] as? String, object["kind"] as? String == "episode" {
                         _ = try await PipelineRunner.run(["process", episodeID])
-                        _ = try await PipelineRunner.run(["translate", episodeID])
                     } else if let sourceID = object["id"] as? String {
                         _ = try await PipelineRunner.run([
                             "update", "--trigger", "new_source", "--lookback-days", "3650",
@@ -210,6 +223,8 @@ final class AppModel: ObservableObject {
     }
 
     func retrySelected() {
+        guard !isUpdating else { return }
+        errorMessage = nil
         guard let id = selectedEpisode?.id else { return }
         ownsUpdateTask = true
         isUpdating = true
@@ -217,9 +232,8 @@ final class AppModel: ObservableObject {
         Task {
             do {
                 _ = try await PipelineRunner.run(["process", id])
-                _ = try await PipelineRunner.run(["translate", id])
                 reload()
-                updateMessage = "本期处理完成"
+                updateMessage = selectedEpisode?.status == "no_transcript" ? "本期暂无可用字幕" : "本期处理完成"
             } catch {
                 errorMessage = error.localizedDescription
                 updateMessage = "重试失败"
@@ -230,6 +244,8 @@ final class AppModel: ObservableObject {
     }
 
     func translateSelected() {
+        guard !isUpdating else { return }
+        errorMessage = nil
         guard let id = selectedEpisode?.id else { return }
         ownsUpdateTask = true
         isUpdating = true
@@ -250,8 +266,16 @@ final class AppModel: ObservableObject {
 
     func markRead(_ read: Bool) {
         guard let id = selectedEpisode?.id else { return }
-        try? PodcastDatabase.shared.markRead(id, read: read)
-        if let index = episodes.firstIndex(where: { $0.id == id }) { episodes[index].isRead = read }
+        do {
+            try database.markRead(id, read: read)
+            if let index = episodes.firstIndex(where: { $0.id == id }) {
+                let wasRead = episodes[index].isRead
+                episodes[index].isRead = read
+                if wasRead != read, let sourceIndex = sources.firstIndex(where: { $0.id == episodes[index].sourceID }) {
+                    sources[sourceIndex].unreadCount = max(0, sources[sourceIndex].unreadCount + (read ? -1 : 1))
+                }
+            }
+        } catch { errorMessage = error.localizedDescription }
     }
 
     func setSourceEnabled(_ source: Source, enabled: Bool) {

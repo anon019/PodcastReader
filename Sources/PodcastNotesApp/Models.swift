@@ -109,7 +109,8 @@ struct Episode: Identifiable, Hashable {
     }
 
     private static func parseDate(_ value: String) -> Date? {
-        if let date = ISO8601DateFormatter().date(from: value) { return date }
+        if let date = try? Date.ISO8601FormatStyle().parse(value) { return date }
+        if let date = try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(value) { return date }
         return sqliteDateFormatter.date(from: value)
     }
 
@@ -238,7 +239,8 @@ struct PipelineRun: Identifiable, Hashable {
     var finishedTimeLabel: String { finishedDate.map(Self.preciseFormatter.string) ?? "尚未完成" }
 
     private static func parseDate(_ value: String) -> Date? {
-        if let date = ISO8601DateFormatter().date(from: value) { return date }
+        if let date = try? Date.ISO8601FormatStyle().parse(value) { return date }
+        if let date = try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(value) { return date }
         return sqliteDateFormatter.date(from: value)
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 enum PipelineError: Error, LocalizedError {
     case resources(String)
@@ -25,11 +26,25 @@ enum PipelineRunner {
         return match
     }
 
+    static func workerIsRunning(databaseURL: URL) -> Bool {
+        let legacy = databaseURL.deletingLastPathComponent().appendingPathComponent(".daily-update.lock/pid")
+        if let text = try? String(contentsOf: legacy, encoding: .utf8),
+           let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0,
+           kill(pid, 0) == 0 || errno == EPERM { return true }
+        let descriptor = open(databaseURL.path + ".worker.lock", O_RDONLY)
+        guard descriptor >= 0 else { return errno != ENOENT }
+        defer { Darwin.close(descriptor) }
+        if flock(descriptor, LOCK_EX | LOCK_NB) != 0 { return true }
+        flock(descriptor, LOCK_UN)
+        return false
+    }
+
     static func runSync(_ arguments: [String]) throws -> String {
         let resources = try resourcesURL()
         let pipeline = resources.appendingPathComponent("pipeline.py")
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let dbPath = appSupport.appendingPathComponent("PodcastNotes/podcast_notes.sqlite3").path
+        let dbPath = ProcessInfo.processInfo.environment["PODCAST_NOTES_DB"]
+            ?? appSupport.appendingPathComponent("PodcastNotes/podcast_notes.sqlite3").path
         let python = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/python3") ? "/opt/homebrew/bin/python3" : "/usr/bin/python3"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
@@ -62,7 +77,18 @@ enum PipelineRunner {
         let stdout = String(data: (try? Data(contentsOf: stdoutURL)) ?? Data(), encoding: .utf8) ?? ""
         let stderr = String(data: (try? Data(contentsOf: stderrURL)) ?? Data(), encoding: .utf8) ?? ""
         guard process.terminationStatus == 0 else {
-            throw PipelineError.failed(stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? stdout : stderr)
+            let output = stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? stdout : stderr
+            if let data = output.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let message = object["error"] as? String { throw PipelineError.failed(message) }
+                if let failures = object["failed"] as? Int, failures > 0 {
+                    throw PipelineError.failed("更新结束，\(failures) 项未完成；已保存成功内容，请查看处理状态与来源错误。")
+                }
+                if object["status"] as? String == "failed" {
+                    throw PipelineError.failed("本期处理失败，具体原因已保存在节目详情中。")
+                }
+            }
+            throw PipelineError.failed(output)
         }
         return stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }

@@ -76,12 +76,13 @@ class PipelineTests(unittest.TestCase):
         with mock.patch.object(pipeline, "youtube_caption_extraction_enabled", return_value=True), \
              mock.patch.object(pipeline.Path, "exists", return_value=True), \
              mock.patch.object(pipeline.subprocess, "run", side_effect=results) as run:
-            text, segments = pipeline.fetch_transcript({
+            text, segments, source = pipeline.fetch_transcript({
                 "url": "https://www.youtube.com/watch?v=Fallback01",
                 "duration_seconds": 900,
             })
         modes = [call.args[0][call.args[0].index("--youtube") + 1] for call in run.call_args_list]
         self.assertEqual(modes, ["web", "yt-dlp"])
+        self.assertEqual(source, "youtube_ytdlp")
         self.assertNotIn("YouTube views", text)
         self.assertTrue(segments)
         self.assertTrue(all(
@@ -216,15 +217,16 @@ class PipelineTests(unittest.TestCase):
             "topics": [], "keyInsights": [], "extensions": [], "evidenceLimits": [],
             "nextQuestions": [], "guestSources": [],
         }
-        with mock.patch.object(pipeline, "fetch_transcript", return_value=("hello world " * 30, [("0:00", 0.0, "hello world " * 30)])), \
+        with mock.patch.object(pipeline, "fetch_transcript", return_value=("hello world " * 30, [("0:00", 0.0, "hello world " * 30)], "youtube_ytdlp")), \
              mock.patch.object(pipeline, "run_codex", return_value=analysis):
             status = pipeline.process_episode(self.db, "Organized01", RESOURCES)
         row = self.db.execute(
-            "SELECT status,organized_at FROM episodes WHERE id='Organized01'"
+            "SELECT status,organized_at,transcript_source FROM episodes WHERE id='Organized01'"
         ).fetchone()
         self.assertEqual(status, "complete")
         self.assertEqual(row["status"], "complete")
         self.assertIsNotNone(row["organized_at"])
+        self.assertEqual(row["transcript_source"], "youtube_ytdlp")
 
     def test_successful_translation_clears_only_translation_retry_error(self):
         now = pipeline.utc_now()
@@ -315,6 +317,153 @@ class PipelineTests(unittest.TestCase):
         ):
             with self.subTest(target=target), self.assertRaises(ValueError):
                 handler.redirect_request(request, None, 302, "Found", {}, target)
+
+    def insert_episode(self, episode_id, status="complete", source="all-in"):
+        now = pipeline.utc_now()
+        self.db.execute("""INSERT INTO episodes(id,source_id,title,url,published_at,status,
+                           transcript_language,transcript_text,created_at,updated_at)
+                           VALUES(?,?,?,'https://example.invalid',?,?,'en','hello world',?,?)""",
+                        (episode_id, source, episode_id, now, status, now, now))
+        self.db.execute("""INSERT INTO transcript_segments(episode_id,position,timestamp,original_text)
+                           VALUES(?,0,'0:00','hello world')""", (episode_id,))
+        self.db.commit()
+        return self.db.execute("SELECT id FROM transcript_segments WHERE episode_id=?", (episode_id,)).fetchone()[0]
+
+    def test_worker_lock_blocks_cli_before_database_writes_and_releases(self):
+        import subprocess
+        import sys
+        command = [sys.executable, str(RESOURCES / "pipeline.py"), "--db", str(self.db_path), "init"]
+        with pipeline.worker_lock(self.db_path):
+            result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 75)
+            self.assertEqual(json.loads(result.stderr)["status"], "busy")
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_cli_recovers_abandoned_run_after_acquiring_lock(self):
+        import subprocess
+        import sys
+        self.db.execute("INSERT INTO runs(trigger,started_at,status) VALUES('test',?,'running')", (pipeline.utc_now(),))
+        self.db.commit()
+        result = subprocess.run([sys.executable, str(RESOURCES / "pipeline.py"), "--db", str(self.db_path), "init"],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = self.db.execute("SELECT status,finished_at,error FROM runs").fetchone()
+        self.assertEqual(row["status"], "failed")
+        self.assertTrue(row["finished_at"])
+        self.assertIn("退出", row["error"])
+
+    def test_interrupted_stages_resume_and_disabled_sources_are_excluded(self):
+        for episode_id, state, source in [("Fetch", "transcript_fetching", "all-in"),
+                                          ("Analyze", "analyzing", "all-in"),
+                                          ("Disabled", "failed", "all-in"),
+                                          ("Archived", "analyzing", "all-in")]:
+            self.insert_episode(episode_id, state, source)
+        self.db.execute("UPDATE sources SET enabled=0 WHERE id='all-in'")
+        self.db.commit()
+        with mock.patch.object(pipeline, "discover", return_value=([], [])), \
+             mock.patch.object(pipeline, "process_episode", return_value="no_transcript") as process:
+            pipeline.run_update(self.update_args(discover_only=False, retry_failed=True), self.db, RESOURCES)
+            process.assert_not_called()
+            self.db.execute("UPDATE sources SET enabled=1 WHERE id='all-in'")
+            self.db.commit()
+            pipeline.run_update(self.update_args(discover_only=False), self.db, RESOURCES)
+            self.assertEqual({call.args[1] for call in process.call_args_list}, {"Fetch", "Analyze", "Archived"})
+            process.reset_mock()
+            self.db.execute("UPDATE sources SET archived=1 WHERE id='all-in'")
+            self.db.commit()
+            pipeline.run_update(self.update_args(discover_only=False, retry_failed=True), self.db, RESOURCES)
+            process.assert_not_called()
+
+    def test_manual_update_repairs_old_translation_before_receipt_completes(self):
+        segment_id = self.insert_episode("OldTranslation")
+        def translate(*args, **kwargs):
+            self.assertEqual(self.db.execute("SELECT status FROM runs ORDER BY id DESC LIMIT 1").fetchone()[0], "running")
+            return {"translations": [{"segmentId": segment_id, "translatedText": "你好"}]}
+        with mock.patch.object(pipeline, "discover", return_value=([], [])), \
+             mock.patch.object(pipeline, "process_episode") as process, \
+             mock.patch.object(pipeline, "run_codex", side_effect=translate):
+            result = pipeline.run_update(self.update_args(discover_only=False), self.db, RESOURCES)
+        process.assert_not_called()
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(self.db.execute("SELECT translated_text FROM transcript_segments").fetchone()[0], "你好")
+
+    def test_translation_batches_reject_duplicate_missing_foreign_and_blank_ids_atomically(self):
+        segment_id = self.insert_episode("Malformed")
+        good = {"segmentId": segment_id, "translatedText": "你好"}
+        invalid = [[good, good], [], [good, {"segmentId": segment_id+100, "translatedText": "外来"}],
+                   [{"segmentId": segment_id, "translatedText": "  "}],
+                   [{"segmentId": segment_id, "translatedText": 42}]]
+        for translations in invalid:
+            with self.subTest(translations=translations), \
+                 mock.patch.object(pipeline, "run_codex", return_value={"translations": translations}):
+                with self.assertRaises(RuntimeError):
+                    pipeline.translate_episode(self.db, "Malformed", RESOURCES)
+                self.assertIsNone(self.db.execute("SELECT translated_text FROM transcript_segments").fetchone()[0])
+
+    def test_blank_cached_translation_is_repaired(self):
+        segment_id = self.insert_episode("Blank")
+        self.db.execute("UPDATE transcript_segments SET translated_text='  '")
+        self.db.commit()
+        with mock.patch.object(pipeline, "run_codex", return_value={"translations": [{"segmentId": segment_id, "translatedText": "你好"}]}):
+            self.assertEqual(pipeline.translate_episode(self.db, "Blank", RESOURCES), 1)
+
+    def test_backlog_failure_is_recorded_and_not_reported_as_success(self):
+        self.insert_episode("OldFailure")
+        with mock.patch.object(pipeline, "discover", return_value=([], [])), \
+             mock.patch.object(pipeline, "run_codex", side_effect=RuntimeError("offline")):
+            result = pipeline.run_update(self.update_args(discover_only=False), self.db, RESOURCES)
+        self.assertEqual(result["failed"], 1)
+        self.assertIn("翻译待重试", self.db.execute("SELECT error FROM episodes").fetchone()[0])
+        with mock.patch.object(pipeline, "run_update", return_value=result), mock.patch("builtins.print"):
+            self.assertEqual(pipeline.dispatch(self.update_args(command="update", resources=RESOURCES), self.db), 1)
+
+    def test_source_profile_failure_survives_successful_discovery(self):
+        self.enable_only()
+        self.db.execute("UPDATE sources SET health='profile_pending',last_error='profile offline' WHERE id='all-in'")
+        self.db.commit()
+        with mock.patch.object(pipeline, "parse_feed", return_value=[]):
+            pipeline.run_update(self.update_args(), self.db, RESOURCES)
+        source = self.db.execute("SELECT health,last_error FROM sources WHERE id='all-in'").fetchone()
+        self.assertEqual(source["health"], "profile_pending")
+        self.assertEqual(source["last_error"], "profile offline")
+
+    def test_incremental_batch_limit_does_not_skip_remaining_new_episodes(self):
+        self.enable_only()
+        self.insert_episode("Watermark")
+        base = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=10)
+        self.db.execute("UPDATE episodes SET published_at=? WHERE id='Watermark'", (base.isoformat(),))
+        self.db.commit()
+        items = [{"id": f"NewVideo{i:03}", "title": f"Episode {i}", "url": "https://example.invalid",
+                  "thumbnail": "", "description": "", "published": (base + dt.timedelta(days=i)).isoformat()}
+                 for i in range(6, 0, -1)]
+        with mock.patch.object(pipeline, "parse_feed", return_value=items), \
+             mock.patch.object(pipeline, "duration_from_page", return_value=3600):
+            first = pipeline.run_update(self.update_args(per_source=5), self.db, RESOURCES)
+            second = pipeline.run_update(self.update_args(per_source=5), self.db, RESOURCES)
+        self.assertEqual(first["discovered"], 5)
+        self.assertEqual(second["discovered"], 1)
+        self.assertEqual(self.db.execute("SELECT count(*) FROM episodes").fetchone()[0], 7)
+
+    def test_same_publish_timestamp_does_not_hide_an_unseen_episode(self):
+        self.enable_only()
+        self.insert_episode("SameSecond")
+        published = self.db.execute("SELECT published_at FROM episodes").fetchone()[0]
+        item = {"id": "NewSameTime", "title": "Same second", "url": "https://example.invalid",
+                "thumbnail": "", "description": "", "published": published}
+        with mock.patch.object(pipeline, "parse_feed", return_value=[item]), \
+             mock.patch.object(pipeline, "duration_from_page", return_value=3600):
+            self.assertEqual(pipeline.run_update(self.update_args(), self.db, RESOURCES)["discovered"], 1)
+            self.assertEqual(pipeline.run_update(self.update_args(), self.db, RESOURCES)["discovered"], 0)
+
+    def test_profile_retry_survives_a_feed_failure(self):
+        self.enable_only()
+        self.db.execute("UPDATE sources SET health='profile_pending' WHERE id='all-in'")
+        self.db.commit()
+        with mock.patch.object(pipeline, "parse_feed", side_effect=RuntimeError("feed offline")):
+            result = pipeline.run_update(self.update_args(), self.db, RESOURCES)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(self.db.execute("SELECT health FROM sources WHERE id='all-in'").fetchone()[0], "profile_pending")
 
 
 if __name__ == "__main__":
